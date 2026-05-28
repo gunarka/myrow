@@ -1,0 +1,27 @@
+# --- Claude Code project settings (contain device MAC addresses) ---
+.claude/
+
+# --- personal data ---
+woodrower.duckdb
+workouts.json
+
+# --- local device config (BLE address etc.) ---
+# Copy config.example.json → config.json and fill in your device address.
+config.json
+
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# --- editor / OS ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/

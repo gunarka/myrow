@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Woodrower Trainer</title>
+<link rel="stylesheet" href="/static/style.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚣</text></svg>" />
+</head>
+<body>
+
+<header>
+  <h1>🚣 Woodrower Trainer</h1>
+  <nav>
+    <button data-view="list" class="active">Trainings</button>
+    <button data-view="history">Verlauf</button>
+    <button data-view="admin">Admin</button>
+  </nav>
+  <div id="status"><span class="dot"></span><span class="text">getrennt</span></div>
+  <button id="btn-quit" class="ghost" style="margin-left:12px">Beenden</button>
+</header>
+
+<main>
+  <!-- ====================== LIST VIEW ====================== -->
+  <section id="view-list">
+    <div class="list-toolbar">
+      <button id="btn-new">+ Neues Training</button>
+      <button id="btn-free" class="success">▶ Freies Training</button>
+    </div>
+    <div id="workout-list" class="workout-list"></div>
+  </section>
+
+  <!-- ====================== EDITOR VIEW ====================== -->
+  <section id="view-editor" hidden>
+    <div class="editor">
+      <div class="editor-head">
+        <h2 id="editor-title">Training bearbeiten</h2>
+        <div class="total">Gesamtdauer<b id="ed-total-time">0:00:00</b></div>
+      </div>
+
+      <div class="name-row">
+        <label>Name</label>
+        <input type="text" id="ed-name" placeholder="z. B. Pyramide 5×" />
+      </div>
+
+      <fieldset>
+        <legend>Start-Intervall</legend>
+        <div class="segment" id="ed-start-row">
+          <div>
+            <label>Dauer (Sek.)</label>
+            <input type="number" id="ed-start-dur" min="0" value="180" class="dur" />
+          </div>
+          <div>
+            <label>Intensität</label>
+            <div class="slider-grp">
+              <input type="range" id="ed-start-w" min="1" max="15" value="3" class="w" />
+              <span class="w-val" id="ed-start-w-val">3</span>
+            </div>
+          </div>
+        </div>
+        <input type="text" id="ed-start-comment" class="comment-input" placeholder="Kommentar …" />
+      </fieldset>
+
+      <fieldset>
+        <legend>Wiederholung</legend>
+        <div class="reps-meta">
+          <label style="margin:0">Anzahl ×</label>
+          <input type="number" id="ed-reps-count" min="1" value="5" />
+          <label style="margin:0 0 0 16px" title="Letzte X Segmente der letzten Wiederholung weglassen">Letzte Wdh.: letzte</label>
+          <input type="number" id="ed-last-rep-skip" min="0" value="0" style="width:4em" />
+          <label style="margin:0">Segm. ignorieren</label>
+        </div>
+        <input type="text" id="ed-rep-comment" class="comment-input" placeholder="Kommentar Wiederholung …" />
+        <div id="ed-rep-steps"></div>
+        <button class="ghost" id="btn-add-step">+ Schritt</button>
+      </fieldset>
+
+      <fieldset>
+        <legend>End-Intervall</legend>
+        <div class="segment" id="ed-end-row">
+          <div>
+            <label>Dauer (Sek.)</label>
+            <input type="number" id="ed-end-dur" min="0" value="180" class="dur" />
+          </div>
+          <div>
+            <label>Intensität</label>
+            <div class="slider-grp">
+              <input type="range" id="ed-end-w" min="1" max="15" value="3" class="w" />
+              <span class="w-val" id="ed-end-w-val">3</span>
+            </div>
+          </div>
+        </div>
+        <input type="text" id="ed-end-comment" class="comment-input" placeholder="Kommentar …" />
+      </fieldset>
+
+      <div id="ed-preview-wrap"><canvas id="ed-preview"></canvas></div>
+
+      <div class="actions">
+        <button id="btn-save">Speichern</button>
+        <button class="ghost" id="btn-cancel">Abbrechen</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====================== DASHBOARD VIEW ====================== -->
+  <section id="view-dashboard" hidden>
+    <div class="dash-compact">
+
+      <!-- Zeile 1: Fortschritt · Verbleibend · Wiederholung · Buttons -->
+      <div class="dc-row">
+        <div class="dc-card">
+          <div class="dc-label">Fortschritt</div>
+          <div class="dc-val" id="d-progress-pct">0%</div>
+        </div>
+        <div class="dc-card">
+          <div class="dc-label">Verbleibend</div>
+          <div class="dc-val" id="d-total-rem">0:00:00</div>
+        </div>
+        <div class="dc-card">
+          <div class="dc-label">Wiederholung</div>
+          <div class="dc-val" id="d-rep-counter">–</div>
+        </div>
+        <div class="dc-card dc-actions">
+          <select id="d-user-select" title="Benutzer"></select>
+          <button class="icon-btn accent" id="btn-startstop" title="Start / Pause">▶</button>
+          <button class="icon-btn" id="btn-back" title="Beenden">✕</button>
+        </div>
+      </div>
+
+      <!-- Zeile 2: Kommentar -->
+      <div class="dc-comment" id="d-period-comment">–</div>
+
+      <!-- Zeile 3: Intensität · Segmentzeit · SPM · Leistung -->
+      <div class="dc-row">
+        <div class="dc-card">
+          <div class="dc-label" id="d-period-label">Intensitätsstufe</div>
+          <div class="dc-val">
+            <span class="dc-swatch" id="d-period-swatch"></span><span id="d-period-w">–</span><span class="dc-unit"> / 15</span>
+          </div>
+        </div>
+        <div class="dc-card">
+          <div class="dc-label">Segmentzeit</div>
+          <div class="dc-val" id="d-period-rem">–</div>
+        </div>
+        <div class="dc-card">
+          <div class="dc-label">SPM</div>
+          <div class="dc-val"><span id="d-spm">0</span><span class="dc-unit"> spm</span></div>
+        </div>
+        <div class="dc-card">
+          <div class="dc-label">Leistung</div>
+          <div class="dc-val"><span id="d-watt">0</span><span class="dc-unit"> W</span></div>
+        </div>
+      </div>
+
+      <!-- Zeile 4: Chart + Fortschrittsbalken -->
+      <div class="dc-chart-card">
+        <div class="dc-label" id="d-chart-title">Trainingsplan</div>
+        <div id="chart-wrap"><canvas id="chart"></canvas></div>
+        <div id="resistance-wrap" hidden>
+          <div class="label">Widerstand</div>
+          <div class="big" id="d-resistance-val">8</div>
+          <div class="scale">
+            <span style="color:var(--muted);font-size:13px">leicht</span>
+            <input type="range" id="d-resistance-slider" min="1" max="15" value="8" />
+            <span style="color:var(--muted);font-size:13px">schwer</span>
+          </div>
+          <div class="ticks" id="d-resistance-ticks"></div>
+        </div>
+        <div class="dc-progress-track">
+          <div class="dc-progress-fill" id="d-progress-fill" style="width:0%"></div>
+        </div>
+      </div>
+
+      <!-- Versteckte Elemente für JS-Kompatibilität -->
+      <div hidden>
+        <span id="d-total-label"></span>
+        <span id="d-title"></span>
+        <span id="d-dist">0</span>
+        <span id="d-watt-avg">0</span>
+        <span id="d-pace">–</span>
+        <span id="d-pace-avg">–</span>
+        <span id="d-spm-avg">0</span>
+        <span id="d-hr">–</span>
+        <span id="d-hr-avg">–</span>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ====================== HISTORY VIEW ====================== -->
+  <section id="view-history" hidden>
+    <div class="history-toolbar">
+      <button id="btn-kinomap-import">📁 Kinomap-Datei importieren</button>
+      <input type="file" id="kinomap-upload-input"
+             accept=".zip,.tcx,.pwx,.csv" hidden />
+      <span id="import-status" class="import-status"></span>
+    </div>
+
+    <div class="stat-tiles">
+      <div class="tile"><div class="v" id="t-sessions">0</div><div class="u">Trainings</div></div>
+      <div class="tile"><div class="v" id="t-distance">0</div><div class="u">Gesamtdistanz</div></div>
+      <div class="tile"><div class="v" id="t-duration">0:00:00</div><div class="u">Trainingszeit</div></div>
+      <div class="tile"><div class="v" id="t-avg-power">–</div><div class="u">⌀ Leistung</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px;">
+      <h3>Aktivität</h3>
+      <div class="heatmap-row">
+        <div class="heatmap-main">
+          <div class="heatmap-wrap" id="heatmap"></div>
+          <div class="heatmap-legend">
+            <span>weniger</span>
+            <span class="cell" style="background:#d1d5db"></span>
+            <span class="cell" style="background:#93c5fd"></span>
+            <span class="cell" style="background:#3b82f6"></span>
+            <span class="cell" style="background:#ef4444"></span>
+            <span class="cell" style="background:#b91c1c"></span>
+            <span>mehr</span>
+          </div>
+        </div>
+        <div class="heatmap-side">
+          <div id="weekday-hm"></div>
+          <div id="month-hm"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-row">
+      <div class="card">
+        <h3>Persönliche Bestwerte</h3>
+        <div class="bests">
+          <div class="row"><div class="lbl">Max. Leistung</div><div class="val" id="b-max-power">–</div></div>
+          <div class="row"><div class="lbl">Längste Distanz</div><div class="val" id="b-max-distance">–</div></div>
+          <div class="row"><div class="lbl">Längstes Training</div><div class="val" id="b-max-duration">–</div></div>
+          <div class="row"><div class="lbl">Beste Pace</div><div class="val" id="b-best-pace">–</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Durchschnitte (alle Trainings)</h3>
+        <div class="bests">
+          <div class="row"><div class="lbl">⌀ Leistung</div><div class="val" id="a-power">–</div></div>
+          <div class="row"><div class="lbl">⌀ Pace</div><div class="val" id="a-pace">–</div></div>
+          <div class="row"><div class="lbl">⌀ Schlagzahl</div><div class="val" id="a-spm">–</div></div>
+          <div class="row"><div class="lbl">Kalorien gesamt</div><div class="val" id="a-energy">–</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Auswertung mehrerer Trainings -->
+    <div class="card" id="trends-card" style="margin-bottom:14px" hidden>
+      <div class="trends-header">
+        <div>
+          <h3>Auswertung mehrerer Trainings</h3>
+          <div class="trends-subtitle" id="trends-subtitle"></div>
+        </div>
+        <div class="tl-global">
+          <label class="tl-item" style="gap:5px">Fenster
+            <select id="trend-window" style="font-size:11px;padding:1px 4px;border:1px solid var(--border);border-radius:4px;background:var(--card)">
+              <option value="5">5</option>
+              <option value="10" selected>10</option>
+              <option value="20">20</option>
+              <option value="0">alle</option>
+            </select>
+            Einh.
+          </label>
+          <span class="tl-item"><span class="tl-band"></span>P25 – P75</span>
+          <span class="tl-item"><span class="tl-mean"></span>⌀ Mittelwert</span>
+          <span class="tl-item"><span class="tl-dot"></span>Training</span>
+        </div>
+      </div>
+      <div id="trends-charts-grid" class="trends-grid"></div>
+    </div>
+
+    <div class="card" id="trends-profile-card" style="margin-bottom:14px" hidden>
+      <h3>Leistungsprofil – P25 / ⌀ / P75 <span id="trends-profile-n" style="font-weight:400;font-size:12px;color:var(--muted)"></span></h3>
+      <div class="trend-chart-wrap" style="height:200px"><canvas id="trends-profile-canvas"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h3>Letzte Trainings</h3>
+      <div id="sessions-list"></div>
+    </div>
+  </section>
+
+  <!-- ====================== ADMIN VIEW ====================== -->
+  <section id="view-admin" hidden>
+    <div style="max-width:600px">
+      <div style="margin-bottom:16px">
+        <h3 style="margin:0 0 10px;font-size:15px">Benutzerverwaltung</h3>
+        <button id="btn-admin-new">+ Neuer Benutzer</button>
+      </div>
+      <div id="admin-users"></div>
+
+      <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+        <h3 style="margin:0 0 10px;font-size:15px">Bluetooth-Gerät</h3>
+        <div id="ble-current-address" style="font-size:13px;color:var(--muted);margin-bottom:10px"></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" id="ble-address-input"
+                 placeholder="XX:XX:XX:XX:XX:XX"
+                 style="font-family:monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;width:200px;font-size:14px" />
+          <button id="btn-ble-save">Speichern</button>
+          <button id="btn-ble-scan" class="ghost">🔍 Scannen</button>
+        </div>
+        <div id="ble-scan-result" style="margin-top:10px;font-size:13px"></div>
+        <p style="font-size:12px;color:var(--muted);margin:8px 0 0">
+          Bluetooth-Adresse des Rudergeräts (FTMS). Wird beim Trainingsstart direkt verbunden, ohne Scan.
+        </p>
+      </div>
+
+      <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+        <h3 style="margin:0 0 10px;font-size:15px">Erscheinungsbild</h3>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px">
+          <input type="checkbox" id="dark-mode-toggle" />
+          Dark Mode
+        </label>
+      </div>
+
+      <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+        <h3 style="margin:0 0 10px;font-size:15px">Datenverwaltung</h3>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <button id="btn-recalc-energy" class="ghost">🔄 Energie neu berechnen</button>
+          <span id="recalc-status" style="font-size:13px;color:var(--muted)"></span>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin:8px 0 0">Berechnet Grundverbrauch und Trainingsverbrauch für alle gespeicherten Sessions anhand des aktiven Benutzerprofils.</p>
+      </div>
+
+      <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+        <h3 style="margin:0 0 10px;font-size:15px">Export</h3>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <button id="btn-export-all" class="ghost" style="font-size:13px">Alle auswählen</button>
+          <button id="btn-export-none" class="ghost" style="font-size:13px">Keine</button>
+          <span id="export-sel-count" style="font-size:13px;color:var(--muted)"></span>
+        </div>
+        <div id="export-sessions-list" style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:4px 0;margin-bottom:10px;font-size:13px"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button id="btn-export-csv"  class="ghost" style="font-size:13px">↓ CSV</button>
+          <button id="btn-export-json" class="ghost" style="font-size:13px">↓ JSON</button>
+          <button id="btn-export-tcx"  class="ghost" style="font-size:13px">↓ TCX</button>
+          <button id="btn-export-fit"  class="ghost" style="font-size:13px">↓ FIT</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin:8px 0 0">CSV: Übersichtstabelle (Excel/Sheets) · JSON: Vollexport mit Rohdaten · TCX/FIT: Import in Strava, Garmin Connect, Runalyze</p>
+      </div>
+
+      <div id="admin-user-form" class="user-form-wrap" hidden>
+        <h3 id="admin-form-title">Benutzer bearbeiten</h3>
+        <input type="hidden" id="admin-uid" />
+        <div class="user-form-field">
+          <label>Name</label>
+          <input type="text" id="admin-name" placeholder="z. B. Max Mustermann" />
+        </div>
+        <div class="user-form-field">
+          <label>Geburtsdatum</label>
+          <input type="date" id="admin-dob" />
+        </div>
+        <div class="user-form-field">
+          <label>Gewicht (kg)</label>
+          <input type="number" id="admin-weight" min="20" max="400" step="0.1" placeholder="z. B. 75" />
+        </div>
+        <div class="user-form-field">
+          <label>Größe (cm)</label>
+          <input type="number" id="admin-height" min="100" max="250" placeholder="z. B. 178" />
+        </div>
+        <div class="user-form-field">
+          <label>Geschlecht</label>
+          <select id="admin-gender">
+            <option value="">– bitte wählen –</option>
+            <option value="male">Männlich</option>
+            <option value="female">Weiblich</option>
+            <option value="other">Divers</option>
+          </select>
+        </div>
+        <div class="user-form-field">
+          <label>Wirkungsgrad (%)</label>
+          <input type="number" id="admin-efficiency" min="10" max="35" step="0.1" placeholder="22 (Standard)" />
+        </div>
+        <div class="actions" style="margin-top:16px">
+          <button id="btn-admin-save">Speichern</button>
+          <button class="ghost" id="btn-admin-cancel">Abbrechen</button>
+          <button class="danger" id="btn-admin-delete" hidden>Löschen</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====================== SESSION DETAIL VIEW ====================== -->
+  <section id="view-session" hidden>
+    <div class="detail-header">
+      <button class="ghost" id="btn-session-back">← Verlauf</button>
+      <div>
+        <h2 id="sd-name"></h2>
+        <div class="sd-meta" id="sd-meta"></div>
+      </div>
+      <div style="margin-left:auto">
+        <button class="danger" id="btn-session-delete">Löschen</button>
+      </div>
+    </div>
+
+    <div id="sd-kpis"></div>
+
+    <div id="sd-energy-card" class="card" style="margin-bottom:14px" hidden>
+      <h3>Energieverbrauch</h3>
+      <div id="sd-energy-content"></div>
+    </div>
+
+    <div class="sd-charts">
+      <div class="card">
+        <h3>Leistung</h3>
+        <div class="sd-chart-wrap"><canvas id="sd-chart-power"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>Pace</h3>
+        <div class="sd-chart-wrap"><canvas id="sd-chart-pace"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>Schlagzahl</h3>
+        <div class="sd-chart-wrap"><canvas id="sd-chart-spm"></canvas></div>
+      </div>
+      <div class="card" id="sd-hr-card" hidden>
+        <h3>Herzrate</h3>
+        <div class="sd-chart-wrap"><canvas id="sd-chart-hr"></canvas></div>
+      </div>
+      <div class="card" id="sd-force-card" hidden>
+        <h3>Kraft <span style="font-size:11px;font-weight:400;color:var(--muted)">(geschätzt, ∅ pro Schlag)</span></h3>
+        <div class="sd-chart-wrap"><canvas id="sd-chart-force"></canvas></div>
+      </div>
+      <div class="card" id="sd-power-profile-card" hidden>
+        <h3>Leistungsprofil</h3>
+        <div id="sd-power-profile-wrap"><canvas id="sd-chart-profile"></canvas></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- BLE connection overlay — body-level so position:fixed always works -->
+<div id="ble-overlay" hidden>
+  <div class="ble-overlay-inner">
+    <div class="ble-spinner"></div>
+    <h2>Jetzt mit dem Rudern starten</h2>
+    <p id="ble-overlay-msg">Verbinde mit Rudergerät…</p>
+    <button id="btn-ble-cancel" class="ghost" style="margin-top:20px">Abbrechen</button>
+  </div>
+</div>
+
+<script src="/static/app.js?v=20260526b"></script>
+</body>
+</html>
