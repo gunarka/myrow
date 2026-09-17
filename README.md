@@ -47,6 +47,11 @@ zuführen und im Verlauf auszuwerten.
 - **Verlauf & Statistik** – jede Session landet automatisch in einer
   DuckDB neben `server.py`; mit GitHub-Style-Heatmap, persönlichen
   Bestwerten und Durchschnitten.
+- **Auswertung mehrerer Trainings** – im Tab **Verlauf** zeigen
+  Trendkurven über die letzten 5 / 10 / 20 (oder alle) Einheiten
+  Leistung, Pace, Schlagzahl, Distanz, Dauer und Kraft, jeweils mit
+  P25–P75-Band und Mittelwert. Darunter das **Leistungsprofil**
+  (P25 / ⌀ / P75 über den Trainingsverlauf).
 - **Kinomap-Import** – fertige Trainings aus der Kinomap-App
   (`.zip` / `.tcx` / `.pwx` / `.csv`) lassen sich in den Verlauf laden.
 - **Export** – Sessions im Admin-Tab auswählen und als **CSV** (Excel/Sheets),
@@ -65,14 +70,44 @@ zuführen und im Verlauf auszuwerten.
   spätestens alle 45–65 Sekunden ein paar Sekunden ohne Ruderschlag ein
   (abschaltbar mit `WOODROWER_SIM_PAUSES=0`).
 
+## Voraussetzungen
+
+- **Python ≥ 3.9**
+- **Linux mit BlueZ** für den Betrieb mit echtem Rudergerät – der Server
+  ruft `bluetoothctl` auf (Device-Trust, optionaler Adapter-Reset).
+  Ohne Hardware läuft die App über den Simulationsmodus auf jedem
+  Betriebssystem.
+- Ein Browser mit Web-Audio-Unterstützung (für den Countdown-Piepton).
+
 ## Installation
 
 ```bash
-cd woodrower-trainer
+git clone https://github.com/gunarka/myrow.git
+cd myrow
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+Quellcode und Issues: <https://github.com/gunarka/myrow> (Branch `main`).
+
+### Projektstruktur
+
+| Pfad                    | Inhalt                                             |
+| ----------------------- | -------------------------------------------------- |
+| `server.py`             | FastAPI-Backend, FTMS/BLE, DuckDB, Export           |
+| `kinomap_import.py`     | Parser für Kinomap-Exporte (TCX/PWX/CSV/ZIP)        |
+| `index.html`            | SPA-Gerüst                                          |
+| `static/app.js`         | gesamte Frontend-Logik                              |
+| `static/style.css`      | Stile inkl. Dark Mode                               |
+| `start.sh`              | venv aktivieren und Server starten                  |
+| `config.example.json`   | Vorlage für `config.json` (BLE-Adresse)             |
+| `requirements.txt`      | Python-Abhängigkeiten                               |
+| `.claude/settings.json` | Berechtigungen für Claude Code (versioniert)        |
+| `README.md` / `CONTEXT.md` | Nutzer-Anleitung / Entwickler-Briefing           |
+
+Nicht im Repo (lokal erzeugt, per `.gitignore` ausgeschlossen):
+`config.json`, `woodrower.duckdb`, `.venv/`, Exportdateien.
 
 ## Erststart / Initial Setup
 
@@ -214,6 +249,35 @@ direkt der Widerstandslevel des Rudergeräts (Woodrower: 1–15).
   abonnieren.
 - Mehrere Profile / Pulszonen.
 
+## Mitarbeiten / Patches einspielen
+
+Änderungen kommen als `.patch`-Datei (z. B. aus einem Chat-Download in
+`~/Downloads`). Einspielen aus dem Projektverzeichnis:
+
+```bash
+cd ~/Programme/projects/myrow
+
+# 1) Vorab prüfen, ob der Patch sauber passt
+git apply --check ~/Downloads/beispiel.patch
+
+# 2) Anwenden
+git apply ~/Downloads/beispiel.patch
+
+# 3) Ergebnis ansehen, committen und pushen
+git diff --stat
+git add -A
+git commit -m "Doku: README und CONTEXT aktualisiert"
+git push origin main
+```
+
+Schlägt `git apply` fehl, hilft meist `git apply -3 ~/Downloads/beispiel.patch`
+(Drei-Wege-Merge) oder ein `git stash` der lokalen Änderungen vorher.
+Zurücknehmen lässt sich ein noch nicht committeter Patch mit
+`git apply -R ~/Downloads/beispiel.patch`.
+
+Es gibt derzeit keine CI, keine GitHub Actions und keine Releases – der
+Stand auf `main` ist der gültige Stand.
+
 ## Lizenz
 
-MIT – einfach behalten, anpassen, zerlegen.
+MIT – einfach behalten, anpassen, zerlegen. Siehe [`LICENSE`](LICENSE).

@@ -1,7 +1,8 @@
 # CONTEXT.md — Woodrower Trainer
 
 > Briefing für Claude Code (oder jeden anderen, der hier weiterbaut).
-> Stand: August 2026. Zuletzt aktualisiert: 2026-08-19.
+> Stand: September 2026. Zuletzt aktualisiert: 2026-09-17.
+> Repo: <https://github.com/gunarka/myrow> (Branch `main`, siehe §12).
 
 ## 1 · Worum geht's
 
@@ -48,21 +49,27 @@ Single-process. Kein Build-Step. Eine eingebettete DuckDB-Datei.
 
 ## 3 · Dateien
 
-| Datei                | Zweck                                              | Größe    |
-|----------------------|----------------------------------------------------|----------|
-| `server.py`          | FastAPI-Backend, FTMS-Parser, WS, DuckDB-Layer     | ~2246 Z  |
-| `kinomap_import.py`  | TCX/PWX/CSV/ZIP-Parser für Kinomap-Exporte         | ~486 Z   |
-| `index.html`         | SPA-Shell (nur HTML), lädt static/                 | ~477 Z   |
-| `static/app.js`      | Gesamte SPA-Logik (alle Views, WS, Canvas-Chart)   | ~2993 Z  |
-| `static/style.css`   | Alle CSS-Regeln (inkl. Dark Mode)                  | ~587 Z   |
-| `start.sh`           | Venv aktivieren + `python server.py` starten       | –        |
-| `config.json`        | BLE-Adresse + Verbindungsparameter des Geräts      | –        |
-| `woodrower.duckdb`   | DB-Datei (Workouts, Sessions, Samples)             | wächst   |
-| `requirements.txt`   | fastapi, uvicorn, bleak, duckdb, defusedxml, fit-tool, … | 8 Zeilen |
-| `README.md`          | Endnutzer-Anleitung                                | –        |
-| `CONTEXT.md`         | dieses Dokument                                    | –        |
+| Datei                   | Zweck                                              | Größe    |
+|-------------------------|----------------------------------------------------|----------|
+| `server.py`             | FastAPI-Backend, FTMS-Parser, WS, DuckDB-Layer     | ~2290 Z  |
+| `kinomap_import.py`     | TCX/PWX/CSV/ZIP-Parser für Kinomap-Exporte         | ~489 Z   |
+| `index.html`            | SPA-Shell (nur HTML), lädt static/                 | ~494 Z   |
+| `static/app.js`         | Gesamte SPA-Logik (alle Views, WS, Canvas-Chart)   | ~3030 Z  |
+| `static/style.css`      | Alle CSS-Regeln (inkl. Dark Mode)                  | ~594 Z   |
+| `start.sh`              | Venv aktivieren + `python server.py` starten       | –        |
+| `config.example.json`   | Vorlage für `config.json` (leeres `ble_address`)   | –        |
+| `config.json`           | BLE-Adresse + Geräteparameter — **nicht im Repo**  | –        |
+| `woodrower.duckdb`      | DB (Workouts, Sessions, Samples) — **nicht im Repo** | wächst |
+| `requirements.txt`      | fastapi, uvicorn, bleak, duckdb, defusedxml, fit-tool, … | 7 Zeilen |
+| `.gitignore`            | schließt lokale Daten / venv / Exporte aus (§12)   | –        |
+| `.claude/settings.json` | Claude-Code-Berechtigungen, **versioniert**        | –        |
+| `LICENSE`               | MIT                                                | –        |
+| `README.md`             | Endnutzer-Anleitung                                | –        |
+| `CONTEXT.md`            | dieses Dokument                                    | –        |
 
 `ble_test.py` wurde entfernt (war ein interaktives Debug-Tool, nicht mehr im Repo).
+`.claude/settings.local.json` und `.claude/**/*.local.json` sind bewusst
+ignoriert (persönliche Einstellungen), die projektweite `settings.json` nicht.
 
 ## 4 · Datenmodell
 
@@ -834,6 +841,38 @@ Hot Spots, wo Änderungen oft Folge­fehler haben:
   Pausieren sollten über `pauseTrainingAuto()` gehen, neue
   Resume-Bedingungen über `resumeFromAutoPause()`, sonst laufen
   Training/Aufzeichnung und Overlay-Anzeige auseinander.
+
+## 12 · Git / GitHub
+
+Das Projekt liegt öffentlich auf GitHub:
+<https://github.com/gunarka/myrow> — einziger Branch: `main`, kein
+Fork, keine Tags/Releases, **keine GitHub Actions / kein CI**. Der
+Stand auf `main` ist der gültige Stand; Tests laufen manuell (§10).
+
+**Was nicht ins Repo gehört** (`.gitignore`): `config.json` (BLE-Adresse
+des Geräts), `*.duckdb` / `*.duckdb.wal` (persönliche Sessiondaten),
+`workouts.json(.bak)`, `.venv/`, Exportartefakte (`*.fit`, `*.tcx`,
+`*.pwx`, `exports/`), Logs, Editor- und OS-Dateien. Vor jedem Commit
+kurz `git status` prüfen — ein versehentlich eingecheckter
+`woodrower.duckdb` enthält vollständige Trainingsdaten inklusive Puls.
+
+**Arbeitsweise mit Patches** (so entstehen Änderungen aus dem Chat):
+
+```bash
+cd ~/Programme/projects/myrow
+git apply --check ~/Downloads/aenderung.patch   # trocken testen
+git apply         ~/Downloads/aenderung.patch   # anwenden
+git diff --stat                                 # Ergebnis ansehen
+git add -A && git commit -m "…" && git push origin main
+```
+
+`git apply -3 …` nutzt einen Drei-Wege-Merge, wenn der Patch nicht exakt
+passt; `git apply -R …` nimmt einen noch nicht committeten Patch zurück.
+
+**Hinweis zur Gliederung:** Die Unterabschnitte in §6 sind historisch
+gewachsen und stehen nicht in numerischer Reihenfolge (6.10 vor 6.9,
+6.12 vor 6.11). Querverweise nutzen die Nummern, deshalb wurde bewusst
+nicht umsortiert — neue Abschnitte hinten anhängen.
 
 ---
 
