@@ -16,6 +16,9 @@ Run:
 
 Environment variables:
   * WOODROWER_SIM=1      → fake rower data, no Bluetooth needed (UI test).
+  * WOODROWER_SIM_PAUSES=0 → disable the random simulated rowing pauses
+                            that WOODROWER_SIM=1 inserts by default (used to
+                            exercise the auto-pause overlay/resume flow).
   * WOODROWER_HOST=...   → bind address (default 127.0.0.1, localhost only).
                             Set to "0.0.0.0" to expose on the LAN — there is
                             NO authentication, only do this on a trusted net.
@@ -46,6 +49,7 @@ import os
 import random
 import signal
 import struct
+import subprocess
 import threading
 import time
 import zipfile
@@ -66,6 +70,7 @@ import kinomap_import
 
 try:
     from bleak import BleakClient, BleakScanner
+    from bleak.exc import BleakDeviceNotFoundError
     BLEAK_AVAILABLE = True
 except ImportError:
     BLEAK_AVAILABLE = False
@@ -92,11 +97,121 @@ DB_FILE = BASE_DIR / "woodrower.duckdb"
 LEGACY_WORKOUTS_FILE = BASE_DIR / "workouts.json"
 CONFIG_FILE = BASE_DIR / "config.json"
 SIM_MODE = os.environ.get("WOODROWER_SIM", "0") == "1"
+# In simulation mode, randomly insert a few seconds without any stroke —
+# lets the auto-pause overlay/resume behaviour be exercised without a real
+# rower. Set WOODROWER_SIM_PAUSES=0 to get an uninterrupted, steady stroke
+# (e.g. while testing something else that doesn't want the interruption).
+SIM_RANDOM_PAUSES = os.environ.get("WOODROWER_SIM_PAUSES", "1") == "1"
 
 # Bind address. Defaults to localhost — there is no auth, so we don't
 # want to be reachable from the LAN unless the user explicitly opts in.
 HOST = os.environ.get("WOODROWER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("WOODROWER_PORT", "8000"))
+
+# --- BLE connection tuning -------------------------------------------------
+# The Woodrower goes to sleep (stops advertising) after a while without a
+# stroke/button press. A short pre-connect scan often misses its adverts,
+# and BlueZ tends to drop its cached "device object" for an address right
+# after a failed connect — so the *next* attempt fails instantly with
+# "device not found" instead of really trying. Giving the scan more time
+# and reusing the device object we actually find fixes both symptoms.
+BLE_SCAN_TIMEOUT    = float(os.environ.get("WOODROWER_BLE_SCAN_TIMEOUT", "15"))
+BLE_CONNECT_TIMEOUT = float(os.environ.get("WOODROWER_BLE_CONNECT_TIMEOUT", "45"))
+
+# Fixed pause between reconnect attempts. The device is known/stable, so a
+# steady interval (rather than a growing one) gives the fastest average
+# recovery without needing to special-case "how many failures so far".
+BLE_RECONNECT_BACKOFF = float(os.environ.get("WOODROWER_BLE_RECONNECT_BACKOFF", "5"))
+
+# Opt-in: power-cycle the local Bluetooth adapter after N consecutive
+# failures. Off by default because it affects *every* BT device on the
+# machine (mouse, headset, …), not just the rower.
+BLE_RESET_ADAPTER        = os.environ.get("WOODROWER_BLE_RESET_ADAPTER", "0") == "1"
+BLE_RESET_AFTER_FAILURES = 3
+
+
+def _reset_bt_adapter() -> None:
+    """Power-cycle the local Bluetooth adapter via bluetoothctl.
+
+    Only called when WOODROWER_BLE_RESET_ADAPTER=1. Helps recover from a
+    BlueZ state where a previously-failed device object blocks further
+    reconnect attempts to a known address.
+    """
+    try:
+        subprocess.run(["bluetoothctl", "power", "off"],
+                        timeout=5, check=False, capture_output=True)
+        time.sleep(1)
+        subprocess.run(["bluetoothctl", "power", "on"],
+                        timeout=5, check=False, capture_output=True)
+        log.info("Bluetooth-Adapter neu gestartet (power off/on)")
+    except Exception as exc:            # noqa: BLE001
+        log.warning("Adapter-Reset fehlgeschlagen: %s", exc)
+
+
+def _trust_device(address: str) -> None:
+    """Mark the rower as 'trusted' in BlueZ.
+
+    Confirmed via diagnostics (2026-08-19): an unpaired/untrusted BLE
+    device can be purged from BlueZ's D-Bus object list shortly after a
+    scan ends. ``bluetoothctl connect`` still succeeds (it keeps its own
+    live session/cache), but a fresh ``bleak`` client — address string OR
+    scanned device object — then fails with "device not found", even
+    though the device is right there and was just seen advertising.
+    Marking it trusted keeps BlueZ from dropping it between scan and
+    connect. This does NOT pair/bond the device (FTMS rowers typically
+    don't require or support pairing) — it's a much lighter, persistent
+    flag. Safe to call every time; a no-op if already trusted.
+    """
+    try:
+        subprocess.run(["bluetoothctl", "trust", address],
+                        timeout=5, check=False, capture_output=True)
+    except Exception as exc:            # noqa: BLE001
+        log.debug("could not mark device as trusted: %s", exc)
+
+
+async def _broadcast_retry(delay: float) -> None:
+    """Broadcast a disconnected status including when the next reconnect
+    attempt will fire, so the UI can show a countdown. ``retry_in`` is the
+    authoritative value (client computes its own local deadline from it,
+    avoiding any dependence on server/client clock sync); ``retry_at`` is
+    included as a convenience/debugging aid."""
+    await manager.broadcast({
+        "type": "status", "connected": False,
+        "retry_in": delay, "retry_at": time.time() + delay,
+    })
+
+
+async def _wait_for_device(address: str, timeout: float):
+    """Actively scan for ``address`` using a live detection callback instead
+    of a single blocking BlueZ query (``find_device_by_address``).
+
+    Returns the ``BLEDevice`` as soon as it is actually seen over the air
+    (often within 1-2s), or ``None`` if nothing showed up within
+    ``timeout`` seconds. This matters for two reasons:
+
+    1. It's faster — we don't wait out the full timeout when the device
+       shows up early.
+    2. It's more reliable — ``find_device_by_address`` has been observed
+       (see CONTEXT.md / support log 2026-08-19) to report "not found" even
+       while the device is powered on and in range. A live callback reacts
+       to every advertisement BlueZ hands us, with no extra filtering.
+    """
+    address = address.lower()
+    found_event = asyncio.Event()
+    found_device: list[Any] = [None]
+
+    def _cb(device, _adv) -> None:
+        if device.address.lower() == address and found_device[0] is None:
+            found_device[0] = device
+            found_event.set()
+
+    scanner = BleakScanner(detection_callback=_cb)
+    async with scanner:
+        try:
+            await asyncio.wait_for(found_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+    return found_device[0]
 
 # Upload cap for /api/sessions/import. A Kinomap ZIP is typically
 # 1–3 MB; 20 MB is a generous ceiling that still keeps the server from
@@ -420,6 +535,53 @@ def db_get_session(session_id: int) -> dict[str, Any] | None:
         ).fetchall()
     out["samples"] = [_row_to_dict(scols, r) for r in srows]
     return out
+
+
+def db_get_sessions_bulk(session_ids: list[int]) -> list[dict[str, Any]]:
+    """Same output shape as db_get_session(), but for many sessions in 2
+    queries total instead of 2×N. Used by the multi-session exporters
+    (CSV/JSON/TCX/FIT), which previously called db_get_session() in a loop.
+    Returns sessions in the order of ``session_ids``; unknown ids are
+    silently skipped (mirrors db_get_session() returning None for those)."""
+    if not session_ids:
+        return []
+    cols = ["id", "workout_name", "workout_snapshot", "started_at",
+            "ended_at", "duration_s", "total_distance", "avg_power",
+            "max_power", "avg_spm", "avg_pace", "avg_hr",
+            "total_energy", "completed",
+            "max_spm", "max_hr", "best_pace",
+            "bmr_kcal", "exercise_kcal", "total_kcal", "user_id"]
+    scols = ["session_id", "t_sec", "power", "spm", "pace", "distance", "hr", "energy"]
+    ph = ",".join("?" * len(session_ids))
+    with _db_lock:
+        rows = db().execute(
+            f"SELECT {','.join(cols)} FROM sessions WHERE id IN ({ph})",
+            session_ids,
+        ).fetchall()
+        srows = db().execute(
+            f"SELECT {','.join(scols)} FROM samples "
+            f"WHERE session_id IN ({ph}) ORDER BY session_id, t_sec",
+            session_ids,
+        ).fetchall()
+
+    samples_by_sid: dict[int, list[dict[str, Any]]] = {}
+    for r in srows:
+        d = _row_to_dict(scols, r)
+        sid = d.pop("session_id")
+        samples_by_sid.setdefault(sid, []).append(d)
+
+    by_id: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        out = _row_to_dict(cols, row)
+        if out.get("workout_snapshot"):
+            try:
+                out["workout_snapshot"] = json.loads(out["workout_snapshot"])
+            except json.JSONDecodeError:
+                pass
+        out["samples"] = samples_by_sid.get(out["id"], [])
+        by_id[out["id"]] = out
+
+    return [by_id[sid] for sid in session_ids if sid in by_id]
 
 
 def db_import_session(result: "kinomap_import.ImportResult") -> int:
@@ -784,6 +946,10 @@ _resistance_lock = asyncio.Lock()
 # Stays set forever once triggered — the task reconnects on drops automatically.
 _ble_connect_event: asyncio.Event | None = None
 
+# Handle of the currently running rower task (real or simulated), so it can be
+# cancelled and replaced when the mode is switched at runtime via /api/sim.
+_rower_task: asyncio.Task | None = None
+
 
 def _clamp_level(level: int) -> int:
     return max(rower.resistance_min, min(rower.resistance_max, int(level)))
@@ -874,7 +1040,23 @@ async def set_resistance(level: int) -> bool:
             if rower.cp_indications_active:
                 rower._cp_event = asyncio.Event()
                 rower._cp_result = None
-            payload = bytes([FTMS_OP_SET_RESISTANCE, level * 10])
+            # Op Code (1 byte) + Resistance Level, 0.1-steps per FTMS spec.
+            # This Woodrower's firmware validates the Control Point payload
+            # for opcode 0x04 strictly by length: it only reads one byte
+            # after the opcode and rejects the full spec-compliant 3-byte
+            # frame (opcode + sint16) with error=0x03 (Invalid Parameter).
+            # As long as level*10 fits in a single byte (level <= 25; the
+            # Woodrower's own range tops out at 15), the minimal 2-byte
+            # frame is what the device actually accepts. For FTMS devices
+            # with a larger resistance range (level*10 > 255) we still send
+            # the full 3-byte sint16 frame, since struct.pack("<BB", ...)
+            # would otherwise raise ValueError for values above 255 — this
+            # was the original bug this line used to fix.
+            raw = level * 10
+            if raw <= 255:
+                payload = struct.pack("<BB", FTMS_OP_SET_RESISTANCE, raw)
+            else:
+                payload = struct.pack("<Bh", FTMS_OP_SET_RESISTANCE, raw)
             await rower.client.write_gatt_char(
                 CONTROL_POINT_UUID, payload, response=True,
             )
@@ -915,7 +1097,7 @@ class ConnectionManager:
         log.info("client connected (%d total)", len(self.connections))
         await ws.send_json({
             "type": "status",
-            "connected": rower.client is not None,
+            "connected": rower.connected,
             "address":   rower.address,
         })
         if rower.current_resistance is not None:
@@ -933,15 +1115,21 @@ class ConnectionManager:
         """Send `message` (as JSON) to every connected WebSocket client.
         Any client whose send fails (closed socket, network error) is
         silently removed — callers don't need to care about dead clients.
+
+        Sends fan out concurrently rather than one-by-one: with several
+        browser tabs open, a single slow/stalled client would otherwise
+        delay delivery to every other client on every ~1 Hz rower update.
         """
-        dead: list[WebSocket] = []
-        for ws in self.connections:
-            try:
-                await ws.send_json(message)
-            except Exception:        # noqa: BLE001 — any failure → drop client
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
+        if not self.connections:
+            return
+        targets = list(self.connections)
+        results = await asyncio.gather(
+            *(ws.send_json(message) for ws in targets),
+            return_exceptions=True,
+        )
+        for ws, result in zip(targets, results):
+            if isinstance(result, Exception):   # noqa: BLE001 — any failure → drop client
+                self.disconnect(ws)
 
 
 manager = ConnectionManager()
@@ -1058,6 +1246,8 @@ async def _maybe_record_sample(payload: dict[str, Any]) -> None:
 
 async def real_rower_task() -> None:
     loop = asyncio.get_running_loop()
+    consecutive_failures = 0
+
     while True:
         # Wait until a training requests the connection.
         if _ble_connect_event is not None:
@@ -1078,17 +1268,48 @@ async def real_rower_task() -> None:
 
         log.info("connecting to %s …", address)
 
-        # Warm up BlueZ's device cache before connecting.
-        # This shortens the subsequent HCI connect time significantly.
+        # Actively scan (event-driven, see _wait_for_device) instead of the
+        # older one-shot find_device_by_address(), which has been observed
+        # to report "not found" even while the device is powered on and in
+        # range. If we don't see the device at all, a "blind" connect by
+        # address has — in practice — never succeeded here; it only hangs
+        # for the full BLE_CONNECT_TIMEOUT before failing. So we skip it
+        # and go straight to the backoff/retry instead of wasting a minute
+        # per cycle on a doomed attempt.
+        found = None
         try:
-            found = await BleakScanner.find_device_by_address(address, timeout=8.0)
-            if found:
-                log.info("device found in scan: %s", found.name)
-            else:
-                log.warning("device not found in scan — attempting direct connect anyway")
+            found = await _wait_for_device(address, BLE_SCAN_TIMEOUT)
         except Exception as exc:
-            log.warning("pre-connect scan failed: %s", exc)
+            log.warning("scan failed: %s", exc)
 
+        if found is None:
+            consecutive_failures += 1
+            log.warning(
+                "Rudergerät %s nicht im %.0fs-Scan gesehen (Versuch #%d), obwohl "
+                "es evtl. an und in Reichweite ist. Mögliche Ursachen: "
+                "Bluetooth-Adapter in einem hängenden Zustand, Gerät bereits mit "
+                "einer anderen App verbunden (Decathlon-/Domyos-Coach?), oder "
+                "die MAC-Adresse in config.json stimmt nicht mehr. "
+                "Prüfe ggf. mit 'bluetoothctl scan on' manuell, ob das Gerät "
+                "unter dieser Adresse sichtbar ist.",
+                address, BLE_SCAN_TIMEOUT, consecutive_failures,
+            )
+            if BLE_RESET_ADAPTER and consecutive_failures % BLE_RESET_AFTER_FAILURES == 0:
+                # subprocess + time.sleep() → off the event loop, or every WS
+                # broadcast / BLE notify dispatch stalls for its duration.
+                await asyncio.to_thread(_reset_bt_adapter)
+            await _broadcast_retry(BLE_RECONNECT_BACKOFF)
+            log.info("retrying in %.0fs (consecutive failures: %d)",
+                     BLE_RECONNECT_BACKOFF, consecutive_failures)
+            await asyncio.sleep(BLE_RECONNECT_BACKOFF)
+            continue
+
+        log.info("device found in scan: %s", found.name)
+        # subprocess.run() blocks — same reasoning as _reset_bt_adapter above.
+        # This runs on *every* successful scan, so it's the more important
+        # of the two to keep off the loop.
+        await asyncio.to_thread(_trust_device, address)
+        connect_target = found
 
         try:
             def on_notify(_char, raw: bytearray) -> None:
@@ -1132,7 +1353,21 @@ async def real_rower_task() -> None:
                                 rower._cp_event.set()
                         loop.call_soon_threadsafe(_signal)
 
-            async with BleakClient(address, timeout=45.0) as client:
+            # Signalled by on_disconnect() so the loop below can react to a
+            # dropped connection immediately instead of waiting out the next
+            # 1s poll tick (see the while client.is_connected loop further
+            # down). Purely a latency improvement — the finally: block still
+            # does the actual state cleanup either way.
+            disconnect_event = asyncio.Event()
+
+            def on_disconnect(_client) -> None:
+                log.info("BLE disconnect callback fired")
+                loop.call_soon_threadsafe(disconnect_event.set)
+
+            async with BleakClient(
+                connect_target, timeout=BLE_CONNECT_TIMEOUT,
+                disconnected_callback=on_disconnect,
+            ) as client:
                 rower.client = client
                 rower.address = address
                 rower.control_acquired = False
@@ -1152,40 +1387,81 @@ async def real_rower_task() -> None:
                     log.info("subscribed to FTMS Control Point indications")
                 except Exception as e:  # noqa: BLE001
                     log.warning("could not subscribe to FTMS CP indications: %s", e)
-                try:
-                    raw = bytes(await client.read_gatt_char(
-                        SUPPORTED_RESISTANCE_RANGE_UUID
-                    ))
-                    if len(raw) == 3:
-                        r_min, r_max, _ = raw[0], raw[1], raw[2]
-                    elif len(raw) >= 6:
-                        r_min, r_max, _ = struct.unpack_from("<HHH", raw)
-                    else:
-                        raise ValueError(f"unexpected length {len(raw)}")
-                    rower.resistance_min = r_min // 10
-                    rower.resistance_max = r_max // 10
+                # The resistance range never changes for a given device, so once
+                # we've read it successfully we cache it in config.json and skip
+                # the GATT round-trip on every future connect. Re-reads itself
+                # automatically if the address changes (e.g. different rower).
+                cached_min = cfg.get("ble_resistance_min")
+                cached_max = cfg.get("ble_resistance_max")
+                if (
+                    cached_min is not None and cached_max is not None
+                    and cfg.get("ble_resistance_addr") == address
+                ):
+                    rower.resistance_min = int(cached_min)
+                    rower.resistance_max = int(cached_max)
                     log.info(
-                        "resistance range from device: %d–%d (raw %d–%d)",
-                        rower.resistance_min, rower.resistance_max, r_min, r_max,
+                        "resistance range from cache: %d–%d (skipping 0x2AD6 read)",
+                        rower.resistance_min, rower.resistance_max,
                     )
-                except Exception as e:  # noqa: BLE001
-                    rower.resistance_min = RESISTANCE_MIN
-                    rower.resistance_max = RESISTANCE_MAX
-                    log.info(
-                        "0x2AD6 not available (%s) — using defaults %d–%d",
-                        e, RESISTANCE_MIN, RESISTANCE_MAX,
-                    )
+                else:
+                    try:
+                        raw = bytes(await client.read_gatt_char(
+                            SUPPORTED_RESISTANCE_RANGE_UUID
+                        ))
+                        if len(raw) == 3:
+                            r_min, r_max, _ = raw[0], raw[1], raw[2]
+                        elif len(raw) >= 6:
+                            r_min, r_max, _ = struct.unpack_from("<HHH", raw)
+                        else:
+                            raise ValueError(f"unexpected length {len(raw)}")
+                        rower.resistance_min = r_min // 10
+                        rower.resistance_max = r_max // 10
+                        log.info(
+                            "resistance range from device: %d–%d (raw %d–%d)",
+                            rower.resistance_min, rower.resistance_max, r_min, r_max,
+                        )
+                        save_config({
+                            "ble_resistance_min":  rower.resistance_min,
+                            "ble_resistance_max":  rower.resistance_max,
+                            "ble_resistance_addr": address,
+                        })
+                    except Exception as e:  # noqa: BLE001
+                        rower.resistance_min = RESISTANCE_MIN
+                        rower.resistance_max = RESISTANCE_MAX
+                        log.info(
+                            "0x2AD6 not available (%s) — using defaults %d–%d",
+                            e, RESISTANCE_MIN, RESISTANCE_MAX,
+                        )
                 rower.connected = True
+                consecutive_failures = 0
                 log.info("subscribed to rower data, streaming…")
                 if rower._pending_resistance is not None:
                     pending = rower._pending_resistance
                     rower._pending_resistance = None
                     asyncio.create_task(set_resistance(pending))
+                # Wait for on_disconnect() to fire rather than blindly polling
+                # is_connected once a second — reacts to a drop immediately.
+                # The 1s timeout is just a safety net in case the callback is
+                # ever missed (e.g. an ungraceful process-level BT failure).
                 while client.is_connected:
-                    await asyncio.sleep(1)
+                    disconnect_event.clear()
+                    try:
+                        await asyncio.wait_for(disconnect_event.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    break
         except asyncio.CancelledError:
             raise
+        except BleakDeviceNotFoundError:
+            # Expected/common case when the rower is asleep or out of range —
+            # log it without a full traceback to keep the log readable.
+            consecutive_failures += 1
+            log.warning(
+                "Rudergerät %s nicht erreichbar (Versuch #%d, nicht gefunden)",
+                address, consecutive_failures,
+            )
         except Exception as exc:         # noqa: BLE001
+            consecutive_failures += 1
             log.exception("rower task error: %s", exc)
         finally:
             rower.client = None
@@ -1194,12 +1470,21 @@ async def real_rower_task() -> None:
             rower.device_started = False
             rower.cp_indications_active = False
             rower._pending_resistance = None
-        await manager.broadcast({"type": "status", "connected": False})
-        await asyncio.sleep(5)
+        if BLE_RESET_ADAPTER and consecutive_failures and \
+                consecutive_failures % BLE_RESET_AFTER_FAILURES == 0:
+            await asyncio.to_thread(_reset_bt_adapter)
+
+        await _broadcast_retry(BLE_RECONNECT_BACKOFF)
+        log.info("retrying in %.0fs (consecutive failures: %d)",
+                 BLE_RECONNECT_BACKOFF, consecutive_failures)
+        await asyncio.sleep(BLE_RECONNECT_BACKOFF)
 
 
 async def simulated_rower_task() -> None:
     log.warning("running in SIMULATION mode – no real Bluetooth connection")
+    if SIM_RANDOM_PAUSES:
+        log.info("SIM: random rowing pauses enabled (auto-pause testing) — "
+                  "set WOODROWER_SIM_PAUSES=0 to disable")
     rower.connected = True
     rower.address = "SIM"
     rower.current_resistance = round(RESISTANCE_MAX / 2)
@@ -1207,30 +1492,88 @@ async def simulated_rower_task() -> None:
     await manager.broadcast({"type": "resistance", "level": rower.current_resistance})
     t = 0.0
     distance = 0
+    # Ticks (each SIM_TICK_S seconds) remaining in a simulated rowing pause —
+    # exercises the frontend's auto-pause overlay/resume flow (see
+    # CONTEXT.md §6.14) without needing a real rower to stop rowing. A pure
+    # per-tick coin flip can go a long time without firing (with the old
+    # 5 %/tick chance, ~20 % of 60 s test windows saw none at all), which
+    # made this hard to rely on for manual testing — so on top of the
+    # per-tick chance there's now a hard cap: if no pause has happened for
+    # SIM_PAUSE_FORCE_AFTER_S seconds of actual rowing, one is forced.
+    SIM_TICK_S = 2
+    SIM_PAUSE_CHANCE = 0.08          # per-tick probability once eligible
+    SIM_PAUSE_FORCE_AFTER_S = 45     # guaranteed upper bound between pauses
+    pause_ticks_left = 0
+    rowing_ticks_since_pause = 0
     while True:
-        # resistance influences perceived power in sim
-        res = rower.current_resistance or 5
-        base = (15 + res * 4) + 12 * math.sin(t * 0.08)
-        power = max(0, int(base + random.uniform(-6, 6)))
-        distance += int(2 + power / 30)
+        if SIM_RANDOM_PAUSES and pause_ticks_left <= 0:
+            rowing_ticks_since_pause += 1
+            forced = rowing_ticks_since_pause * SIM_TICK_S >= SIM_PAUSE_FORCE_AFTER_S
+            if forced or random.random() < SIM_PAUSE_CHANCE:
+                pause_s = random.randint(8, 20)
+                pause_ticks_left = round(pause_s / SIM_TICK_S)
+                rowing_ticks_since_pause = 0
+                log.info("SIM: simulating a rowing pause for ~%ds%s",
+                          pause_s, " (forced, none for a while)" if forced else "")
+
+        if pause_ticks_left > 0:
+            # No stroke: power/spm at zero, distance doesn't advance — just
+            # like a rower that's been set down for a moment.
+            pause_ticks_left -= 1
+            power = 0
+            spm = 0
+            pace = None
+        else:
+            # resistance influences perceived power in sim
+            res = rower.current_resistance or 5
+            base = (15 + res * 4) + 12 * math.sin(t * 0.08)
+            power = max(0, int(base + random.uniform(-6, 6)))
+            spm = 30
+            pace = int(500 / max(1, power / 30 + 1)) if power else None
+            distance += int(2 + power / 30)
         payload = {
             "type": "rower",
             "power": power,
-            "spm": 30,
-            "pace": int(500 / max(1, power / 30 + 1)) if power else None,
+            "spm": spm,
+            "pace": pace,
             "distance": distance,
             "hr": None,
             "energy": int(t * 0.05),
         }
         await manager.broadcast(payload)
         await _maybe_record_sample(payload)
-        t += 2
-        await asyncio.sleep(2)
+        t += SIM_TICK_S
+        await asyncio.sleep(SIM_TICK_S)
 
 
 # ---------------------------------------------------------------------------
 # FastAPI lifecycle & routes
 # ---------------------------------------------------------------------------
+
+async def _start_rower_task() -> None:
+    """(Re)start the background rower task matching the current SIM_MODE.
+    Cancels any previously running task first, so this is safe to call both
+    at startup and to switch modes at runtime (see /api/sim)."""
+    global _rower_task
+    if _rower_task is not None:
+        _rower_task.cancel()
+        try:
+            await _rower_task
+        except asyncio.CancelledError:
+            pass
+    rower.client = None
+    rower.connected = False
+    rower.control_acquired = False
+    rower.device_started = False
+    rower.cp_indications_active = False
+    rower._pending_resistance = None
+    if SIM_MODE or not BLEAK_AVAILABLE:
+        if not BLEAK_AVAILABLE:
+            log.warning("bleak not installed – simulation mode")
+        _rower_task = asyncio.create_task(simulated_rower_task())
+    else:
+        _rower_task = asyncio.create_task(real_rower_task())
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1238,20 +1581,16 @@ async def lifespan(app: FastAPI):
     _ble_connect_event = asyncio.Event()
     init_db()
     log.info("DuckDB ready at %s", DB_FILE)
-    if SIM_MODE or not BLEAK_AVAILABLE:
-        if not BLEAK_AVAILABLE:
-            log.warning("bleak not installed – simulation mode")
-        task = asyncio.create_task(simulated_rower_task())
-    else:
-        task = asyncio.create_task(real_rower_task())
+    await _start_rower_task()
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if _rower_task is not None:
+            _rower_task.cancel()
+            try:
+                await _rower_task
+            except asyncio.CancelledError:
+                pass
         close_db()
 
 
@@ -1353,7 +1692,10 @@ async def api_session_stop(session_id: int, body: dict[str, Any] | None = None):
         raise HTTPException(409, "session is not active")
     duration = active.elapsed()
     completed = bool((body or {}).get("completed", False))
-    summary = db_finalise_session(session_id, duration, completed)
+    # Aggregates over all samples of the session — can take a moment for a
+    # long workout, so keep it off the event loop (WS broadcast / BLE notify
+    # dispatch would otherwise stall for the duration of the query).
+    summary = await asyncio.to_thread(db_finalise_session, session_id, duration, completed)
     active.reset()
     log.info("session %s stopped (duration=%.1fs, completed=%s)",
              session_id, duration, completed)
@@ -1398,7 +1740,9 @@ async def api_session_import(file: UploadFile = File(...)):
         raise HTTPException(400, f"could not parse upload: {e}")
 
     try:
-        sid = db_import_session(result)
+        # A Kinomap import can insert thousands of sample rows in one
+        # executemany() — off the event loop for the same reason as above.
+        sid = await asyncio.to_thread(db_import_session, result)
     except ValueError as e:
         raise HTTPException(409, str(e))
 
@@ -1427,7 +1771,8 @@ async def api_list_sessions(limit: int = 100):
 
 @app.get("/api/sessions/{session_id}")
 async def api_get_session(session_id: int):
-    s = db_get_session(session_id)
+    # Pulls every sample row for the session — offload for long workouts.
+    s = await asyncio.to_thread(db_get_session, session_id)
     if s is None:
         raise HTTPException(404, "session not found")
     return s
@@ -1478,12 +1823,15 @@ async def api_resistance_set(body: dict[str, Any]):
 
 @app.get("/api/stats")
 async def api_stats(days: int = 0):
-    return db_stats(days=days)
+    return await asyncio.to_thread(db_stats, days)
 
 
 @app.get("/api/stats/trends")
 async def api_stats_trends():
-    return db_trends()
+    # Heaviest read in the app: per-session power-profile sliding-window
+    # computation in pure Python over up to 50 sessions' worth of samples.
+    # Definitely worth keeping off the event loop.
+    return await asyncio.to_thread(db_trends)
 
 
 @app.post("/api/shutdown")
@@ -1511,12 +1859,39 @@ def _export_session_ids(ids_param: str | None) -> list[int]:
 
 
 def _sessions_for_export(ids: list[int]) -> list[dict[str, Any]]:
-    result = []
-    for sid in ids:
-        s = db_get_session(sid)
-        if s is not None:
-            result.append(s)
-    return result
+    return db_get_sessions_bulk(ids)
+
+
+def _fetch_csv_rows(cols: list[str], session_ids: list[int]) -> list[tuple]:
+    """Blocking DuckDB read for the CSV export. Kept as a plain function
+    (rather than inline in the route) so it can be run via asyncio.to_thread."""
+    if not session_ids:
+        return []
+    with _db_lock:
+        return db().execute(
+            f"SELECT {','.join(cols)} FROM sessions "
+            f"WHERE id IN ({','.join('?' * len(session_ids))})"
+            " ORDER BY started_at DESC",
+            session_ids,
+        ).fetchall()
+
+
+def _build_tcx_zip(sessions: list[dict[str, Any]]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for s in sessions:
+            fname = f"session_{s['id']}_{_fmt_dt(s.get('started_at'))[:10]}.tcx"
+            zf.writestr(fname, _session_to_tcx(s).encode())
+    return buf.getvalue()
+
+
+def _build_fit_zip(sessions: list[dict[str, Any]]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for s in sessions:
+            fname = f"session_{s['id']}_{_fmt_dt(s.get('started_at'))[:10]}.fit"
+            zf.writestr(fname, _session_to_fit_bytes(s))
+    return buf.getvalue()
 
 
 def _parse_dt(dt: datetime | str | None) -> datetime | None:
@@ -1711,7 +2086,7 @@ def _session_to_fit_bytes(s: dict[str, Any]) -> bytes:
 
 @app.get("/api/export/csv")
 async def api_export_csv(ids: str | None = None):
-    session_ids = _export_session_ids(ids)
+    session_ids = await asyncio.to_thread(_export_session_ids, ids)
     cols = [
         "id", "workout_name", "started_at", "ended_at", "duration_s",
         "total_distance", "avg_power", "max_power", "avg_spm", "max_spm",
@@ -1722,13 +2097,7 @@ async def api_export_csv(ids: str | None = None):
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     writer.writeheader()
-    with _db_lock:
-        rows = db().execute(
-            f"SELECT {','.join(cols)} FROM sessions "
-            f"WHERE id IN ({','.join('?' * len(session_ids))})"
-            " ORDER BY started_at DESC",
-            session_ids,
-        ).fetchall() if session_ids else []
+    rows = await asyncio.to_thread(_fetch_csv_rows, cols, session_ids)
     for row in rows:
         d = dict(zip(cols, row))
         for k, v in d.items():
@@ -1745,8 +2114,8 @@ async def api_export_csv(ids: str | None = None):
 
 @app.get("/api/export/json")
 async def api_export_json(ids: str | None = None):
-    session_ids = _export_session_ids(ids)
-    sessions = _sessions_for_export(session_ids)
+    session_ids = await asyncio.to_thread(_export_session_ids, ids)
+    sessions = await asyncio.to_thread(_sessions_for_export, session_ids)
 
     def _serialise(obj: Any) -> Any:
         if isinstance(obj, datetime):
@@ -1763,10 +2132,12 @@ async def api_export_json(ids: str | None = None):
 
 @app.get("/api/export/tcx")
 async def api_export_tcx(ids: str | None = None):
-    session_ids = _export_session_ids(ids)
-    sessions = _sessions_for_export(session_ids)
+    session_ids = await asyncio.to_thread(_export_session_ids, ids)
+    sessions = await asyncio.to_thread(_sessions_for_export, session_ids)
 
     if len(sessions) == 1:
+        # Single-session TCX is cheap (string formatting) — not worth the
+        # thread hop.
         s = sessions[0]
         fname = f"session_{s['id']}_{_fmt_dt(s.get('started_at'))[:10]}.tcx"
         return Response(
@@ -1775,13 +2146,10 @@ async def api_export_tcx(ids: str | None = None):
             headers={"Content-Disposition": f'attachment; filename="{fname}"'},
         )
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for s in sessions:
-            fname = f"session_{s['id']}_{_fmt_dt(s.get('started_at'))[:10]}.tcx"
-            zf.writestr(fname, _session_to_tcx(s).encode())
+    # Multi-session zip can be a lot of string building — offload it.
+    content = await asyncio.to_thread(_build_tcx_zip, sessions)
     return Response(
-        content=buf.getvalue(),
+        content=content,
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="woodrower_sessions_tcx.zip"'},
     )
@@ -1789,25 +2157,25 @@ async def api_export_tcx(ids: str | None = None):
 
 @app.get("/api/export/fit")
 async def api_export_fit(ids: str | None = None):
-    session_ids = _export_session_ids(ids)
-    sessions = _sessions_for_export(session_ids)
+    session_ids = await asyncio.to_thread(_export_session_ids, ids)
+    sessions = await asyncio.to_thread(_sessions_for_export, session_ids)
 
     if len(sessions) == 1:
+        # fit-tool's message-by-message builder is noticeably more CPU-heavy
+        # per sample than the TCX string formatting above — worth offloading
+        # even for a single session.
         s = sessions[0]
         fname = f"session_{s['id']}_{_fmt_dt(s.get('started_at'))[:10]}.fit"
+        content = await asyncio.to_thread(_session_to_fit_bytes, s)
         return Response(
-            content=_session_to_fit_bytes(s),
+            content=content,
             media_type="application/octet-stream",
             headers={"Content-Disposition": f'attachment; filename="{fname}"'},
         )
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for s in sessions:
-            fname = f"session_{s['id']}_{_fmt_dt(s.get('started_at'))[:10]}.fit"
-            zf.writestr(fname, _session_to_fit_bytes(s))
+    content = await asyncio.to_thread(_build_fit_zip, sessions)
     return Response(
-        content=buf.getvalue(),
+        content=content,
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="woodrower_sessions_fit.zip"'},
     )
@@ -1853,6 +2221,22 @@ async def api_ble_disconnect():
         except Exception:  # noqa: BLE001
             pass
     return {"ok": True}
+
+
+@app.put("/api/sim")
+async def api_sim_set(body: dict[str, Any]):
+    """Switch between simulation and real-rower mode at runtime (Admin-Bereich).
+    Refused while a training is actively recording, to avoid pulling the rug
+    out from under a running session."""
+    global SIM_MODE
+    enabled = bool(body.get("enabled"))
+    if enabled == SIM_MODE:
+        return {"ok": True, "sim": SIM_MODE}
+    if active.id is not None:
+        raise HTTPException(409, "Es läuft gerade ein Training – bitte zuerst beenden.")
+    SIM_MODE = enabled
+    await _start_rower_task()
+    return {"ok": True, "sim": SIM_MODE}
 
 
 @app.post("/api/ble/scan")

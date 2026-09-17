@@ -52,14 +52,36 @@ function escapeHtml(s) {
 
 // ---------- BLE state + overlay ----------
 const bleState = { connected: false };
+let bleRetryTimer  = null;   // setInterval handle for the retry countdown
+let bleRetryDeadline = null; // performance.now()-based target for the countdown
 
-function showBleOverlay(reason = "connecting") {
+function showBleOverlay(reason = "connecting", retryInSec = null) {
   const overlay = document.getElementById("ble-overlay");
   const msg     = document.getElementById("ble-overlay-msg");
   if (!overlay) return;
+  clearInterval(bleRetryTimer);
+  bleRetryTimer = null;
   if (reason === "no_address") {
     msg.innerHTML = `Kein Gerät konfiguriert.<br>
       <small>Bitte zuerst im <b>Admin</b>-Bereich die Bluetooth-Adresse eintragen.</small>`;
+  } else if (reason === "retrying" && retryInSec != null) {
+    // Deadline is computed from *our* clock (performance.now()), not the
+    // server's retry_at timestamp — avoids any dependence on client/server
+    // clock sync, we only need the server-given delay.
+    bleRetryDeadline = performance.now() + retryInSec * 1000;
+    const tick = () => {
+      const secsLeft = Math.max(0, Math.round((bleRetryDeadline - performance.now()) / 1000));
+      if (secsLeft <= 0) {
+        msg.textContent = "Verbinde mit Rudergerät…";
+        clearInterval(bleRetryTimer);
+        bleRetryTimer = null;
+        return;
+      }
+      msg.innerHTML = `Rudergerät nicht gefunden.<br>
+        <small>Nächster Versuch in ${secsLeft}s…</small>`;
+    };
+    tick();
+    bleRetryTimer = setInterval(tick, 250);
   } else {
     msg.textContent = "Verbinde mit Rudergerät…";
   }
@@ -69,6 +91,8 @@ function showBleOverlay(reason = "connecting") {
 function hideBleOverlay() {
   const overlay = document.getElementById("ble-overlay");
   if (overlay) overlay.hidden = true;
+  clearInterval(bleRetryTimer);
+  bleRetryTimer = null;
 }
 
 async function requestBleConnect() {
@@ -82,10 +106,110 @@ async function requestBleConnect() {
 }
 
 document.getElementById("btn-ble-cancel").onclick = () => {
+  // Mid-training (session already running) this overlay is being reused to
+  // retry a dropped BLE connection — "Abbrechen" there means abort & save
+  // the training rather than just disconnecting.
+  if (dash.sessionId != null) { abortTraining(); return; }
   hideBleOverlay();
   showView("list");
   fetch("/api/ble/disconnect", { method: "POST" }).catch(() => {});
 };
+
+// ---------- auto-pause overlay (no stroke detected / BLE drop mid-training) ----------
+function showAutoPauseOverlay() {
+  hideBleOverlay();
+  const overlay = document.getElementById("autopause-overlay");
+  if (overlay) overlay.hidden = false;
+}
+function hideAutoPauseOverlay() {
+  const overlay = document.getElementById("autopause-overlay");
+  if (overlay) overlay.hidden = true;
+}
+document.getElementById("btn-autopause-cancel").onclick = () => abortTraining();
+
+// Pauses the running training + recording without user interaction, e.g.
+// because rowing stopped or the BLE connection dropped. Idempotent — safe
+// to call repeatedly while already paused (e.g. on every retry broadcast).
+function pauseTrainingAuto() {
+  if (dash.running) {
+    dash.running = false;
+    dash.pausedAt = performance.now();
+    apiPauseSession(dash.sessionId);
+    $("#btn-startstop").textContent = "▶";
+  }
+  dash.autoPaused = true;
+}
+// Shared resume bookkeeping — used both by the manual ▶ button and by
+// automatic resume-on-stroke (whether the pause was automatic or the
+// person pressed the pause button themselves, see onRowerData()).
+function resumeTraining() {
+  dash.pausedAcc += performance.now() - dash.pausedAt;
+  dash.running = true;
+  dash.lastStrokeAt = performance.now();
+  apiResumeSession(dash.sessionId);
+  $("#btn-startstop").textContent = "⏸";
+}
+function resumeFromAutoPause() {
+  if (!dash.autoPaused) return;
+  dash.autoPaused = false;
+  resumeTraining();
+  hideAutoPauseOverlay();
+  hideBleOverlay();
+}
+// Ends the current training early (auto-pause "Training abbrechen" and the
+// reused BLE-reconnect overlay's "Abbrechen") and saves what was recorded.
+async function abortTraining() {
+  hideAutoPauseOverlay();
+  hideBleOverlay();
+  if (dash.sessionId != null) {
+    const completed = dash.freeMode
+      ? elapsedSec() > 5
+      : (dash.totalSec > 0 && elapsedSec() >= dash.totalSec);
+    recordSessionEnergy(dash.sessionId, dash.userId);
+    await apiStopSession(dash.sessionId, completed);
+    dash.sessionId = null;
+  }
+  dash.autoPaused = false;
+  showView("list");
+}
+
+// ---------- training-end overlay (defined workout completed) ----------
+let _trainingEndTimer = null;
+function showTrainingEndOverlay(stats) {
+  hideAutoPauseOverlay();
+  hideBleOverlay();
+  const rows = [
+    ["Dauer",         fmtTime(stats.duration)],
+    ["Distanz",       fmtDistance(stats.distance)],
+    ["⌀ Leistung",    stats.avgWatt != null ? `${stats.avgWatt} W` : "–"],
+    ["⌀ Schlagzahl",  stats.avgSpm  != null ? `${stats.avgSpm} spm` : "–"],
+    ["⌀ Pace",        stats.avgPace != null ? `${fmtPace(stats.avgPace)} /500m` : "–"],
+  ];
+  if (stats.avgHr != null) rows.push(["⌀ Puls", `${stats.avgHr} bpm`]);
+  if (stats.kcal  != null) rows.push(["Kalorien", `${stats.kcal} kcal`]);
+  $("#trainingend-stats").innerHTML = rows.map(([label, val]) =>
+    `<div class="te-stat"><div class="te-label">${escapeHtml(label)}</div><div class="te-val">${escapeHtml(String(val))}</div></div>`
+  ).join("");
+
+  document.getElementById("trainingend-overlay").hidden = false;
+
+  const deadline = performance.now() + 10000;
+  clearInterval(_trainingEndTimer);
+  const tick = () => {
+    const secsLeft = Math.max(0, Math.ceil((deadline - performance.now()) / 1000));
+    $("#trainingend-countdown").textContent = `Weiter zum Trainingsverlauf in ${secsLeft}s…`;
+    if (secsLeft <= 0) closeTrainingEndOverlay();
+  };
+  tick();
+  _trainingEndTimer = setInterval(tick, 250);
+}
+function closeTrainingEndOverlay() {
+  clearInterval(_trainingEndTimer);
+  _trainingEndTimer = null;
+  document.getElementById("trainingend-overlay").hidden = true;
+  showView("history");
+}
+document.getElementById("btn-trainingend-done").onclick = closeTrainingEndOverlay;
 
 // ---------- view switch ----------
 function showView(name) {
@@ -255,9 +379,13 @@ function recalcEditorDuration() {
   const startDur = +$("#ed-start-dur").value || 0;
   const endDur   = +$("#ed-end-dur").value   || 0;
   const reps     = +$("#ed-reps-count").value || 1;
-  const stepSum  = $$("#ed-rep-steps .segment").reduce((s, r) =>
-    s + (+r.querySelector(".dur").value || 0), 0);
-  const total = startDur + endDur + reps * stepSum;
+  const skip     = +$("#ed-last-rep-skip").value || 0;
+  const stepDurs = $$("#ed-rep-steps .segment").map(r => +r.querySelector(".dur").value || 0);
+  const stepSum  = stepDurs.reduce((s, d) => s + d, 0);
+  const skipN    = Math.min(skip, stepDurs.length);
+  const lastSum  = stepDurs.slice(0, stepDurs.length - skipN).reduce((s, d) => s + d, 0);
+  const repSecs  = reps > 1 ? (reps - 1) * stepSum + lastSum : lastSum;
+  const total = startDur + endDur + repSecs;
   $("#ed-total-time").textContent = fmtTime(total);
   drawEditorPreview();
 }
@@ -585,6 +713,11 @@ function playBeep(freq = 880, dur = 0.08) {
     osc.stop(_audioCtx.currentTime + dur);
   } catch (e) {}
 }
+// Segment-change / end-of-training cue: played once, exactly at the moment
+// of the change (the countdown beep already covers 3, 2, 1 seconds before).
+// Higher in pitch than the countdown beep, and held for 0.5 s so it stands
+// out clearly as the "change happened now" signal.
+function playFinishBeep() { playBeep(1760, 1); }
 
 // ---------- dashboard ----------
 const dash = {
@@ -606,7 +739,23 @@ const dash = {
   currentSegIdx: -1,
   autoStartPending: false,
   beepedKeys:  new Set(),
+  lastStrokeAt: null,   // performance.now() of the last detected stroke (auto-pause)
+  autoPaused:   false,  // true while paused automatically (idle or BLE drop)
 };
+
+// No stroke for this long while running → auto-pause training + recording.
+// Configurable in the Admin tab (persisted in localStorage); default matches
+// one slow stroke cycle (~4s at ~15 spm) plus a small safety margin so a
+// normal pause between two strokes never triggers it by accident.
+const AUTO_PAUSE_IDLE_KEY = "wr_autopause_idle_s";
+const AUTO_PAUSE_IDLE_DEFAULT_S = 4;
+const AUTO_PAUSE_IDLE_MIN_S = 2;
+const AUTO_PAUSE_IDLE_MAX_S = 30;
+function loadAutoPauseIdleS() {
+  const v = parseFloat(localStorage.getItem(AUTO_PAUSE_IDLE_KEY));
+  return (Number.isFinite(v) && v > 0) ? v : AUTO_PAUSE_IDLE_DEFAULT_S;
+}
+let AUTO_PAUSE_IDLE_MS = loadAutoPauseIdleS() * 1000;
 
 function setDashboardMode(free) {
   dash.freeMode = free;
@@ -675,6 +824,14 @@ function resetDashState() {
   dash.currentSegIdx = -1;
   dash.autoStartPending = false;
   dash.beepedKeys = new Set();
+  dash.lastStrokeAt = null;
+  dash.autoPaused = false;
+  hideAutoPauseOverlay();
+  hideBleOverlay();
+  clearInterval(_trainingEndTimer);
+  _trainingEndTimer = null;
+  const teOverlay = document.getElementById("trainingend-overlay");
+  if (teOverlay) teOverlay.hidden = true;
 }
 
 async function autoStartSession() {
@@ -688,6 +845,7 @@ async function autoStartSession() {
   dash.sessionId = sid;
   dash.startedAt = performance.now();
   dash.running = true;
+  dash.lastStrokeAt = performance.now();
   dash.autoStartPending = false;
   $("#btn-startstop").textContent = "⏸";
   const initPct = dash.freeMode
@@ -718,26 +876,14 @@ $("#btn-startstop").onclick = async () => {
     dash.running = false;
     dash.pausedAt = performance.now();
     apiPauseSession(dash.sessionId);
+    $("#btn-startstop").textContent = "▶";
   } else {
-    dash.pausedAcc += performance.now() - dash.pausedAt;
-    dash.running = true;
-    apiResumeSession(dash.sessionId);
+    resumeTraining();
   }
-  $("#btn-startstop").textContent = dash.running ? "⏸" : "▶";
 };
 
 
-$("#btn-back").onclick = async () => {
-  if (dash.sessionId != null) {
-    const completed = dash.freeMode
-      ? elapsedSec() > 5
-      : (dash.totalSec > 0 && elapsedSec() >= dash.totalSec);
-    recordSessionEnergy(dash.sessionId, dash.userId);
-    await apiStopSession(dash.sessionId, completed);
-    dash.sessionId = null;
-  }
-  showView("list");
-};
+$("#btn-back").onclick = () => abortTraining();
 
 // ---------- resistance slider ----------
 async function initResistance() {
@@ -769,8 +915,9 @@ initResistance();
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
+  let pingTimer = null;
   ws.onopen = () => {
-    setInterval(() => { try { ws.send("ping"); } catch {} }, 25000);
+    pingTimer = setInterval(() => { try { ws.send("ping"); } catch {} }, 25000);
   };
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
@@ -786,8 +933,27 @@ function connectWS() {
             && !document.getElementById("view-dashboard").hidden) {
           autoStartSession();
         }
+        // Reconnected mid-training: BLE is back, but nobody is rowing yet —
+        // fall back to the normal auto-pause "Pause" card until a stroke
+        // arrives (handled by onRowerData → resumeFromAutoPause).
+        if (dash.autoPaused && dash.sessionId != null) {
+          showAutoPauseOverlay();
+        }
+      } else if (dash.sessionId != null) {
+        // Connection dropped mid-training: pause training + recording and
+        // reuse the known BLE overlay while a reconnect is attempted.
+        pauseTrainingAuto();
+        if (msg.error === "no_address")       showBleOverlay("no_address");
+        else if (msg.retry_in != null)        showBleOverlay("retrying", msg.retry_in);
+        else                                  showBleOverlay("connecting");
       } else if (msg.error === "no_address") {
         showBleOverlay("no_address");
+      } else if (msg.retry_in != null
+          && !document.getElementById("ble-overlay").hidden) {
+        // Only update the countdown if the overlay is already showing (i.e.
+        // the user is actively trying to connect) — a drop mid-workout or a
+        // stale retry loop after leaving the dashboard shouldn't pop it up.
+        showBleOverlay("retrying", msg.retry_in);
       }
     } else if (msg.type === "rower") {
       onRowerData(msg);
@@ -798,6 +964,7 @@ function connectWS() {
     }
   };
   ws.onclose = () => {
+    clearInterval(pingTimer);
     $("#status").classList.remove("on");
     $("#status .text").textContent = "getrennt";
     setTimeout(connectWS, 2000);
@@ -805,16 +972,31 @@ function connectWS() {
 }
 function onRowerData(m) {
   dash.last = m;
+  const isStroke = m.spm > 0 || m.power > 0;
   if (!dash.startedAt && !dash.autoStartPending
       && !document.getElementById("view-dashboard").hidden
-      && (m.spm > 0 || m.power > 0)) {
+      && isStroke) {
     autoStartSession();
   }
+  if (isStroke && dash.autoPaused) {
+    resumeFromAutoPause();
+  } else if (isStroke && dash.startedAt && !dash.running && dash.sessionId != null) {
+    // Paused via the manual ▶/⏸ button (not an auto-pause) — resume
+    // automatically as soon as rowing starts again too, as an alternative
+    // to pressing the button. No overlay involved here, unlike
+    // resumeFromAutoPause(), since the person paused it themselves.
+    resumeTraining();
+  }
   if (dash.running && dash.startedAt) {
+    if (isStroke) dash.lastStrokeAt = performance.now();
     const t = elapsedSec();
     if (m.power != null) {
       dash.strokes.push({ t_sec: t, watts: m.power });
-      if (dash.strokes.length > 5000) dash.strokes.splice(0, 1000);
+      // Safety net only (not a display limit) — a normal session never gets
+      // remotely close to this, so the chart always shows every value from
+      // the whole training. Just guards against unbounded memory growth if
+      // a free-training session is left running for an extreme amount of time.
+      if (dash.strokes.length > 200000) dash.strokes.splice(0, 20000);
     }
     if (m.power != null) { dash.sums.watt += m.power; dash.sums.n += 1; }
     if (m.spm  != null) { dash.sums.spm += m.spm; dash.sums.spmN += 1; }
@@ -825,11 +1007,32 @@ function onRowerData(m) {
 connectWS();
 
 // ---------- dashboard tick ----------
+// Throttled to ~10 Hz: rower notifies arrive ~1x/s (see CONTEXT.md §4.3), so
+// recomputing remaining time / current segment / chart on every animation
+// frame (~60 Hz) was pure waste. Still driven by requestAnimationFrame so it
+// automatically pauses while the tab is hidden.
+const DASH_TICK_MS = 100;
+let _lastDashTick = 0;
 function updateDashboard() {
   if (document.getElementById("view-dashboard").hidden) {
     requestAnimationFrame(updateDashboard);
     return;
   }
+  const now = performance.now();
+  if (now - _lastDashTick < DASH_TICK_MS) {
+    requestAnimationFrame(updateDashboard);
+    return;
+  }
+  _lastDashTick = now;
+
+  // Auto-pause: no stroke for AUTO_PAUSE_IDLE_MS while running → pause
+  // training + recording and show the "Pause" overlay until rowing resumes.
+  if (dash.running && dash.lastStrokeAt
+      && now - dash.lastStrokeAt > AUTO_PAUSE_IDLE_MS) {
+    pauseTrainingAuto();
+    showAutoPauseOverlay();
+  }
+
   const t = elapsedSec();
 
   if (dash.freeMode) {
@@ -841,13 +1044,25 @@ function updateDashboard() {
     if (!dash.completedNotified && dash.sessionId != null
         && dash.totalSec > 0 && t >= dash.totalSec) {
       dash.completedNotified = true;
-      recordSessionEnergy(dash.sessionId, dash.userId);
+      playFinishBeep();
+      const energy = recordSessionEnergy(dash.sessionId, dash.userId);
       apiStopSession(dash.sessionId, true);
+      const stats = {
+        duration: dash.totalSec,
+        distance: dash.last.distance ?? 0,
+        avgWatt:  dash.sums.n    ? Math.round(dash.sums.watt / dash.sums.n) : null,
+        avgSpm:   dash.sums.spmN ? Math.round(dash.sums.spm / dash.sums.spmN) : null,
+        avgPace:  dash.sums.paceN ? dash.sums.paceSum / dash.sums.paceN : null,
+        avgHr:    dash.sums.hrN  ? Math.round(dash.sums.hrSum / dash.sums.hrN) : null,
+        kcal:     energy ? energy.total_kcal : null,
+      };
       dash.sessionId = null;
       dash.running = false;
+      dash.autoPaused = false;
       dash.pausedAt = performance.now();
       $("#btn-startstop").textContent = "✓";
       $("#btn-startstop").disabled = true;
+      showTrainingEndOverlay(stats);
     }
 
     const here = currentSegmentAt(t);
@@ -856,11 +1071,18 @@ function updateDashboard() {
       const segIdx = dash.segments.indexOf(here.seg);
       if (segIdx !== dash.currentSegIdx) {
         dash.currentSegIdx = segIdx;
-        if (dash.running) apiSetResistance(pct);
+        if (dash.running) {
+          apiSetResistance(pct);
+          playFinishBeep();
+        }
       }
       const rem = here.seg.duration_s - here.segElapsed;
       if (dash.running) {
-        const remFloor = Math.floor(rem);
+        // Math.ceil (not floor) so the beep fires right at 3/2/1 seconds
+        // remaining rather than just under the next second — otherwise the
+        // "1s" beep fires ~2s before the change, making that gap look
+        // longer than the ~1s gaps between the other countdown beeps.
+        const remFloor = Math.ceil(rem);
         if (remFloor >= 1 && remFloor <= 3) {
           const key = `${segIdx}-${remFloor}`;
           if (!dash.beepedKeys.has(key)) {
@@ -1033,9 +1255,11 @@ function drawChart(curT = 0) {
   if (curT > 0 && curT <= totalT) {
     const x = xOfT(curT);
     ctx.setLineDash([3, 3]);
-    ctx.strokeStyle = "#374151";
+    ctx.strokeStyle = hexColor("var(--red)");
+    ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + h); ctx.stroke();
     ctx.setLineDash([]);
+    ctx.lineWidth = 1;
   }
 }
 
@@ -2374,7 +2598,7 @@ function calcSessionEnergy(durationSec, avgPower, profile) {
 }
 
 function recordSessionEnergy(sessionId, userId) {
-  if (!sessionId) return;
+  if (!sessionId) return null;
   const profile = userId
     ? (loadUsers().find(u => u.id === userId) || null)
     : getProfile();
@@ -2388,6 +2612,7 @@ function recordSessionEnergy(sessionId, userId) {
   if (energy) {
     apiPatchSessionEnergy(sessionId, { user_id: userId || null, ...energy }).catch(() => {});
   }
+  return energy;
 }
 
 async function recalcAllEnergy(targetUserId) {
@@ -2436,6 +2661,17 @@ async function apiBleScan() {
   const r = await fetch("/api/ble/scan", { method: "POST" });
   if (!r.ok) { let m = `Scan fehlgeschlagen (${r.status})`; try { m = (await r.json()).detail || m; } catch {} throw new Error(m); }
   return await r.json();
+}
+async function apiSimSet(enabled) {
+  const r = await fetch("/api/sim", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  let data = {};
+  try { data = await r.json(); } catch {}
+  if (!r.ok) throw new Error(data.detail || `Fehler (${r.status})`);
+  return data;
 }
 
 async function renderBleConfig() {
@@ -2499,16 +2735,33 @@ async function renderBleConfig() {
     btnScan.disabled = false;
   };
 
+  // Simulationsmodus-Umschalter.
+  const simToggle = $("#sim-mode-toggle");
+  simToggle.onchange = async () => {
+    const enabled = simToggle.checked;
+    simToggle.disabled = true;
+    try {
+      await apiSimSet(enabled);
+    } catch (e) {
+      alert("Simulationsmodus konnte nicht geändert werden: " + e.message);
+      simToggle.checked = !enabled;
+    } finally {
+      simToggle.disabled = false;
+      await renderBleConfig();
+    }
+  };
+
   // Load current config from server.
   try {
     const cfg = await apiBleConfigGet();
     const addr = cfg.address;
+    simToggle.checked = !!cfg.sim;
     $("#ble-current-address").textContent = addr
       ? `Gespeicherte Adresse: ${addr}${cfg.connected ? "  ✓ verbunden" : ""}`
       : "Noch kein Gerät konfiguriert.";
     if (addr) $("#ble-address-input").value = addr;
     if (cfg.sim) {
-      $("#ble-current-address").textContent = "Simulation-Modus aktiv – kein echtes Gerät.";
+      $("#ble-current-address").textContent = "Simulationsmodus aktiv – kein echtes Gerät.";
     }
   } catch (e) {
     $("#ble-current-address").textContent = "Konnte Konfiguration nicht laden.";
@@ -2755,6 +3008,21 @@ window.addEventListener("beforeunload", () => {
       applyTheme(dark);
     });
   }
+})();
+
+// ---------- auto-pause idle threshold ----------
+(function () {
+  const input = document.getElementById("autopause-idle-input");
+  if (!input) return;
+  input.value = loadAutoPauseIdleS();
+  input.addEventListener("change", () => {
+    let v = parseFloat(input.value);
+    if (!Number.isFinite(v) || v <= 0) v = AUTO_PAUSE_IDLE_DEFAULT_S;
+    v = Math.min(AUTO_PAUSE_IDLE_MAX_S, Math.max(AUTO_PAUSE_IDLE_MIN_S, v));
+    input.value = v;
+    localStorage.setItem(AUTO_PAUSE_IDLE_KEY, String(v));
+    AUTO_PAUSE_IDLE_MS = v * 1000;
+  });
 })();
 
 // ---------- boot ----------

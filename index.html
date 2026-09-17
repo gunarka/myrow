@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Woodrower Trainer</title>
-<link rel="stylesheet" href="/static/style.css" />
+<link rel="stylesheet" href="/static/style.css?v=20260911b" />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚣</text></svg>" />
 </head>
 <body>
@@ -305,6 +305,16 @@
         <p style="font-size:12px;color:var(--muted);margin:8px 0 0">
           Bluetooth-Adresse des Rudergeräts (FTMS). Wird beim Trainingsstart direkt verbunden, ohne Scan.
         </p>
+        <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px">
+            <input type="checkbox" id="sim-mode-toggle" />
+            Simulationsmodus (Testbetrieb ohne Rudergerät)
+          </label>
+          <p style="font-size:12px;color:var(--muted);margin:6px 0 0">
+            Erzeugt Testdaten, damit die App ohne angeschlossenes Rudergerät genutzt werden kann.
+            Nicht möglich während ein Training läuft.
+          </p>
+        </div>
       </div>
 
       <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
@@ -313,6 +323,23 @@
           <input type="checkbox" id="dark-mode-toggle" />
           Dark Mode
         </label>
+      </div>
+
+      <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+        <h3 style="margin:0 0 10px;font-size:15px">Auto-Pause</h3>
+        <label style="display:flex;align-items:center;gap:10px;font-size:14px">
+          Pausieren nach
+          <input type="number" id="autopause-idle-input" min="2" max="30" step="0.5" value="4"
+                 style="width:70px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:14px" />
+          Sekunden ohne Ruderschlag
+        </label>
+        <p style="font-size:12px;color:var(--muted);margin:8px 0 0">
+          Richtwert: Bei 15 spm liegen rechnerisch ca. 4,0 s zwischen zwei
+          Schlägen, bei 23 spm ca. 2,6 s (60 ÷ Schläge pro Minute). Der Wert
+          sollte etwas über der Zeit für den langsamsten üblichen Schlag
+          liegen, damit eine normale Pause zwischen zwei Schlägen nicht
+          fälschlich als Trainingspause erkannt wird.
+        </p>
       </div>
 
       <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
@@ -441,6 +468,27 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260526b"></script>
+<!-- Auto-pause overlay — shown when no stroke has been detected for a while -->
+<div id="autopause-overlay" hidden>
+  <div class="ble-overlay-inner">
+    <div class="pause-icon">⏸</div>
+    <h2>Pause</h2>
+    <p>Starte das Rudern zum Fortsetzen</p>
+    <button id="btn-autopause-cancel" class="ghost" style="margin-top:20px">Training abbrechen</button>
+  </div>
+</div>
+
+<!-- Training-end overlay — shown when a defined workout finishes -->
+<div id="trainingend-overlay" hidden>
+  <div class="ble-overlay-inner trainingend-inner">
+    <h2>🎉 Glückwunsch!</h2>
+    <p>Training abgeschlossen</p>
+    <div id="trainingend-stats" class="trainingend-stats"></div>
+    <button id="btn-trainingend-done" style="margin-top:20px">Beenden</button>
+    <p id="trainingend-countdown" style="margin-top:10px;font-size:12px">Weiter zum Trainingsverlauf in 10s…</p>
+  </div>
+</div>
+
+<script src="/static/app.js?v=20260911e"></script>
 </body>
 </html>

@@ -541,7 +541,6 @@
   #ble-overlay {
     position: fixed; inset: 0; z-index: 200;
     background: var(--ble-overlay-bg);
-    backdrop-filter: blur(3px);
     display: flex; align-items: center; justify-content: center;
   }
   .ble-overlay-inner {
@@ -558,6 +557,34 @@
     border-radius: 50%; animation: ble-spin 1s linear infinite;
   }
   @keyframes ble-spin { to { transform: rotate(360deg); } }
+  /* Static (non-animated) stand-in for the spinner on overlays that can sit
+     visible for a long time (auto-pause) — a permanently spinning/blurred
+     overlay is unnecessary GPU load for something that isn't "loading". */
+  .pause-icon {
+    width: 48px; height: 48px; margin: 0 auto;
+    border-radius: 50%; background: var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; line-height: 1; color: var(--muted);
+  }
+
+  /* ---------- Auto-pause / training-end overlays (share ble-overlay look) ---------- */
+  #autopause-overlay[hidden], #trainingend-overlay[hidden] { display: none; }
+  #autopause-overlay, #trainingend-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: var(--ble-overlay-bg);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .trainingend-inner { max-width: 420px; }
+  .trainingend-stats {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px;
+    margin-top: 18px; text-align: left;
+  }
+  .trainingend-stats .te-stat {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 10px;
+  }
+  .trainingend-stats .te-label { font-size: 11px; color: var(--muted); }
+  .trainingend-stats .te-val   { font-size: 17px; font-weight: 700; margin-top: 2px; }
 
   /* ---------- Trend window select (in-card) ---------- */
   #trend-window {

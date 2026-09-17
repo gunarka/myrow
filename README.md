@@ -9,11 +9,27 @@ zuführen und im Verlauf auszuwerten.
 - **Trainings entwerfen & speichern**
   Start-Intervall · Wiederholungsblock mit beliebig vielen Schritten ×
   Wiederholungs­anzahl · End-Intervall. Pro Schritt Dauer (Sek.) und
-  Ziel­intensität (% Widerstand).
+  Ziel-Widerstandslevel (1–15).
 - **Live-Dashboard**
   Gesamt-Restzeit · Fortschrittsbalken · Diagramm mit Soll-Balken und
   tatsächlich geruderter Leistung · aktuelle Periode (Restzeit + Soll-Stufe)
-  · Live-Kennzahlen Watt / spm · kompaktes Layout.
+  · Live-Kennzahlen Watt / spm · akustischer 3-2-1-Countdown vor jedem
+  Segmentwechsel · kompaktes Layout.
+- **Auto-Pause** – bleibt ein paar Sekunden ein Ruderschlag aus,
+  pausieren Training und Aufzeichnung automatisch; ein Overlay
+  ("Pause. Starte das Rudern zum Fortsetzen") zeigt das an und bietet
+  einen Knopf zum Trainingsabbruch. Sobald wieder gerudert wird, laufen
+  Training und Aufzeichnung nahtlos weiter. Fällt währenddessen die
+  Bluetooth-Verbindung weg, versucht der Server automatisch neu zu
+  verbinden (bekanntes Verbindungs-Overlay) — auch hier läuft es beim
+  nächsten Ruderschlag einfach weiter. Die Wartezeit bis zur Auto-Pause
+  (Default 4 s) lässt sich im **Admin**-Tab einstellen und wird im
+  Browser gespeichert.
+- **Trainingsende-Overlay** – ist ein definiertes Training komplett
+  durchlaufen, erscheint ein Glückwunsch-Overlay mit den Kennzahlen der
+  Session (Dauer, Distanz, ⌀ Leistung/Schlagzahl/Pace/Puls, Kalorien).
+  Es wechselt automatisch nach 10 Sekunden (oder per Knopf *Beenden*)
+  in den Trainingsverlauf.
 - **Freies Training** mit großem Widerstands-Slider statt Plan-Diagramm.
 - **Bluetooth-Anbindung über FTMS** – nutzt direkt
   [`bleak`](https://github.com/hbldh/bleak) und parst die FTMS-„Rower
@@ -21,6 +37,10 @@ zuführen und im Verlauf auszuwerten.
   über das FTMS Control Point (`0x2AD9`). Läuft auf Python ≥ 3.9.
   Der erste Verbindungsaufbau dauert ca. 12–20 s (BlueZ handelt
   Verbindungsparameter aus); folgende Verbindungen sind schneller.
+  Verbindet sich per aktivem Scan und merkt sich das Gerät als
+  vertrauenswürdig (`bluetoothctl trust`), was Aussetzer/„device not
+  found"-Fehler beim Reconnect deutlich reduziert; bei anhaltenden
+  Problemen wiederholt der Server mit wachsender Pause automatisch.
 - **Mehrere Nutzerprofile** – Name, Gewicht, Größe, Geburtsdatum und
   Wirkungsgrad werden lokal im Browser gespeichert; Kalorien werden je
   Session dem gewählten Nutzer zugeordnet.
@@ -36,7 +56,14 @@ zuführen und im Verlauf auszuwerten.
 - **Admin-Tab** – Bluetooth-Adresse per UI eintragen/scannen,
   Nutzerprofile verwalten, Dark Mode umschalten, Sessions exportieren.
 - **Simulationsmodus** falls kein Rudergerät verbunden ist – die UI
-  funktioniert trotzdem, mit gefakten Strokes.
+  funktioniert trotzdem, mit gefakten Strokes. Lässt sich sowohl per
+  Umgebungsvariable beim Start als auch jederzeit über einen Schalter
+  im **Admin**-Tab aktivieren/deaktivieren (nicht möglich während ein
+  Training läuft). Startet ein Training im Simulationsmodus, erscheint
+  kein Verbindungs-Overlay, da bereits eine (simulierte) Verbindung
+  besteht. Zum Testen der Auto-Pause baut die Simulation außerdem
+  spätestens alle 45–65 Sekunden ein paar Sekunden ohne Ruderschlag ein
+  (abschaltbar mit `WOODROWER_SIM_PAUSES=0`).
 
 ## Installation
 
@@ -97,11 +124,15 @@ Dann im Browser öffnen: <http://localhost:8000>
 
 ### Konfiguration per Umgebungsvariable
 
-| Variable          | Default     | Wirkung                                              |
-|-------------------|-------------|------------------------------------------------------|
-| `WOODROWER_SIM`   | `0`         | `1` = Simulationsmodus (kein Bluetooth).             |
-| `WOODROWER_HOST`  | `127.0.0.1` | Bind-Adresse. **Default: nur dieser Rechner.**       |
-| `WOODROWER_PORT`  | `8000`      | TCP-Port.                                            |
+| Variable                        | Default     | Wirkung                                              |
+|----------------------------------|-------------|------------------------------------------------------|
+| `WOODROWER_SIM`                 | `0`         | `1` = Simulationsmodus beim Start (kein Bluetooth). Lässt sich danach jederzeit im Admin-Tab umschalten. |
+| `WOODROWER_SIM_PAUSES`          | `1`         | Nur im Simulationsmodus: `0` = kein zufälliges Pausieren des simulierten Ruderns (Dauerbetrieb). |
+| `WOODROWER_HOST`                | `127.0.0.1` | Bind-Adresse. **Default: nur dieser Rechner.**       |
+| `WOODROWER_PORT`                | `8000`      | TCP-Port.                                            |
+| `WOODROWER_BLE_SCAN_TIMEOUT`    | `15`        | Sekunden aktiver BLE-Scan pro Connect-Versuch.       |
+| `WOODROWER_BLE_CONNECT_TIMEOUT` | `45`        | Sekunden Timeout für den eigentlichen GATT-Connect.  |
+| `WOODROWER_BLE_RESET_ADAPTER`   | `0`         | `1` = Bluetooth-Adapter nach mehreren Fehlversuchen in Folge power-cyclen (betrifft alle BT-Geräte am Rechner). |
 
 ### Sicherheits­hinweis
 
@@ -120,12 +151,27 @@ WOODROWER_HOST=0.0.0.0 python server.py
 1. **Trainings** → *+ Neues Training* → Schritte definieren → *Speichern*.
 2. In der Trainingsliste auf ▶ **Start** klicken.
 3. Im Dashboard Nutzer auswählen, dann mit ▶ den Timer starten.
-   ✕ geht zurück zur Liste.
+   ✕ geht zurück zur Liste (und speichert das bisher Trainierte). Mit ⏸
+   lässt sich jederzeit selbst pausieren; sobald danach wieder gerudert
+   wird, geht es automatisch weiter — der ▶-Knopf muss dafür nicht extra
+   gedrückt werden.
+   - Hört das Rudern für ein paar Sekunden auf, pausieren Training und
+     Aufzeichnung automatisch (Overlay *"Pause. Starte das Rudern zum
+     Fortsetzen"*); Rudern fortsetzen macht das Overlay weg und beides
+     läuft weiter. Über den Knopf *Training abbrechen* im Overlay lässt
+     sich das Training stattdessen sofort beenden und speichern.
+   - Bricht währenddessen die Bluetooth-Verbindung ab, versucht die App
+     automatisch neu zu verbinden und pausiert bis dahin ebenfalls.
+   - Ist ein **definiertes** Training komplett durchlaufen, erscheint ein
+     Glückwunsch-Overlay mit den Kennzahlen der Session. Es wechselt nach
+     10 Sekunden automatisch (oder per Knopf *Beenden*) in den
+     Trainingsverlauf.
 4. Im Tab **Verlauf** liegen abgeschlossene Sessions, Bestwerte und die
    Aktivitäts-Heatmap. Dort gibt es auch den Knopf
    *📁 Kinomap-Datei importieren* — einfach das ZIP von Kinomap auswählen.
 5. Im Tab **Admin** lassen sich Nutzerprofile anlegen, die Bluetooth-
    Adresse des Rudergeräts eintragen (oder per Scan suchen), der
+   Simulationsmodus umschalten, die Auto-Pause-Zeit einstellen, der
    Dark Mode aktivieren und Sessions exportieren (CSV / JSON / TCX / FIT).
 6. **Beenden** (oben rechts in der Navigationsleiste) fährt den Server
    sauber herunter und schließt den Tab.
@@ -135,22 +181,28 @@ Die Trainings und Sessions werden in `woodrower.duckdb` neben
 Start automatisch eingelesen und bleibt als Backup liegen.
 
 Die BLE-Adresse des Rudergeräts und gerätespezifische Parameter
-werden in `config.json` gespeichert (wird automatisch angelegt).
+werden in `config.json` gespeichert (wird automatisch angelegt). Nach dem
+ersten erfolgreichen Connect ergänzt der Server dort außerdem den vom
+Gerät gemeldeten Widerstandsbereich (`ble_resistance_min/max`), damit er
+bei künftigen Verbindungen nicht erneut ausgelesen werden muss.
 
 ## Datenmodell (Workout)
+
+`resistance_pct` ist trotz des Namens **kein Prozentwert**, sondern
+direkt der Widerstandslevel des Rudergeräts (Woodrower: 1–15).
 
 ```jsonc
 {
   "Mein Training": {
-    "start":        { "duration_s": 180, "resistance_pct": 15 },
+    "start":        { "duration_s": 180, "resistance_pct": 3 },
     "repeat_count": 5,
     "steps": [
-      { "duration_s": 60, "resistance_pct": 25 },
-      { "duration_s": 30, "resistance_pct": 40 },
-      { "duration_s": 60, "resistance_pct": 25 },
-      { "duration_s": 60, "resistance_pct": 15 }
+      { "duration_s": 60, "resistance_pct": 5 },
+      { "duration_s": 30, "resistance_pct": 8 },
+      { "duration_s": 60, "resistance_pct": 5 },
+      { "duration_s": 60, "resistance_pct": 3 }
     ],
-    "end":          { "duration_s": 180, "resistance_pct": 15 }
+    "end":          { "duration_s": 180, "resistance_pct": 3 }
   }
 }
 ```
@@ -161,7 +213,6 @@ werden in `config.json` gespeichert (wird automatisch angelegt).
 - Brustgurt direkt über den Heart-Rate-Service (`0x180D`, Char `0x2A37`)
   abonnieren.
 - Mehrere Profile / Pulszonen.
-- Audio-Cues 3-2-1 zum Segmentwechsel.
 
 ## Lizenz
 

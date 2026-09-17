@@ -4,5 +4,4 @@ bleak>=0.21
 duckdb>=0.10
 python-multipart>=0.0.9
 defusedxml>=0.7
-aiofiles>=23.0
 fit-tool>=0.9

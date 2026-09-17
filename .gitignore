@@ -1,27 +1,42 @@
-# --- Claude Code project settings (contain device MAC addresses) ---
-.claude/
-
-# --- personal data ---
-woodrower.duckdb
-workouts.json
-
-# --- local device config (BLE address etc.) ---
-# Copy config.example.json → config.json and fill in your device address.
-config.json
-
-# --- Python ---
-.venv/
+# ---------- Python ----------
 __pycache__/
 *.py[cod]
-*.pyo
 *.egg-info/
-dist/
-build/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
 
-# --- editor / OS ---
+# ---------- Lokale Daten (gerätespezifisch / persönlich) ----------
+config.json
+*.duckdb
+*.duckdb.wal
+workouts.json
+workouts.json.bak
+
+# ---------- Exporte / temporäre Dateien ----------
+*.fit
+*.tcx
+*.pwx
+exports/
+tmp/
+*.log
+
+# ---------- Claude Code ----------
+# Projektweite Config (.claude/settings.json, CLAUDE.md) bleibt versioniert,
+# nur lokale/persönliche Einstellungen werden ausgeschlossen.
+.claude/settings.local.json
+.claude/**/*.local.json
+# Alternativ alles ignorieren:
+# .claude/
+
+# ---------- Editor / IDE ----------
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---------- OS ----------
 .DS_Store
 Thumbs.db
-*.swp
-*.swo
-.idea/
-.vscode/

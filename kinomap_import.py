@@ -242,7 +242,10 @@ def parse_pwx(xml_bytes: bytes) -> ImportResult:
 
     samples: list[dict[str, Any]] = []
     last_dist = 0
-    for sample in root.findall("pwx:sample", NS):
+    # <sample> elements are children of <workout>, not of the <pwx> root —
+    # root.findall("pwx:sample", NS) only matches direct children of root
+    # and therefore never found anything (see CONTEXT.md / bug notes).
+    for sample in workout.findall("pwx:sample", NS):
         t_sec = _float_or_none(sample.findtext("pwx:timeoffset", default="", namespaces=NS))
         if t_sec is None:
             continue
