@@ -230,6 +230,72 @@ Server auf `RESISTANCE_MIN=1` / `RESISTANCE_MAX=15` zurück (Standard für
 den Woodrower). `_clamp_level()` begrenzt jeden gesetzten Wert immer auf
 den aktuell bekannten Bereich.
 
+### 4.7 · Gemessene Datencharakteristik (Empirie aus 32 Einheiten)
+
+Basis: `woodrower.duckdb`, 36 Sessions / 100 196 Samples, davon 32 echte
+Einheiten (> 5 min, 21,5 h). Relevant für Auto-Pause (§6.14), Glättung und
+Chart-Rendering.
+
+**Zwei Abtast-Generationen**
+
+| Quelle                    | Sessions | Rate    | `power` |
+|---------------------------|----------|---------|---------|
+| Kinomap-Import (früh)     | 1–15     | 1 Hz    | fehlt (immer 0) |
+| Kinomap-Import (PWX)      | 16–31    | 1 Hz    | vorhanden |
+| Nativ FTMS-Notify         | 60–82    | 4 Hz (≈ 0,25 s) | vorhanden |
+
+`hr` ist in **allen** Sessions 0 — es war nie ein Gurt gekoppelt.
+
+**Datenverlauf innerhalb eines Ruderschlags — Treppenfunktion, keine Kurve**
+
+Der Rower liefert `power`/`spm`/`pace` als *Schlag-Aggregate*, nicht als
+Momentanwerte. Zwischen zwei Katapunkten bleiben sie bitgenau konstant; erst
+am Schlagende springen sie gemeinsam auf den neuen Wert. Es gibt also **keine
+Kraftkurve innerhalb eines Schlags**, nur eine Stufe pro Schlag:
+
+- Plateaulänge @4 Hz: Median **10 Samples ≈ 2,5 s**, p10–p90 = 8–12 Samples.
+  Das deckt sich mit `60 / spm` (2,0–3,1 s bei 19–30 spm).
+- `pace` wechselt in **98 %** der Fälle im selben Sample wie `power`
+  (gemeinsames Schlagende), `spm` nur in **76 %** — bei gleichbleibender
+  Frequenz ändert sich der Zahlenwert schlicht nicht.
+- `spm` ist immer **ganzzahlig** (FTMS liefert 0,5er-Schritte, der Woodrower
+  nutzt sie nicht).
+- `distance` ist der einzige Wert mit **eigener 1-Hz-Kadenz**, unabhängig vom
+  Schlagrhythmus: +2…4 m pro Sekunde (Median 3 m).
+- `energy` zählt in **ganzen kcal alle ~10 s** hoch.
+
+Konsequenz fürs Frontend: `power`-Charts sind Stufen, keine Kurven — Glättung
+über mehrere Samples verwischt nur die Schlaggrenzen und bringt keine
+Information. Ein Schlagzähler sollte die *Wertwechsel* zählen, nicht die
+Samples.
+
+**Wie oft fällt `spm` auf 0?**
+
+- **57 Null-Episoden** in 32 Einheiten; 8 davon sind die Startphase
+  (t ≈ 0, vor dem ersten Schlag) → **49 echte Einbrüche im Training**.
+- Pro Einheit: **Median 1, Mittel 1,5, Max 5**. **13 von 32 Einheiten**
+  (41 %) haben gar keinen Einbruch.
+- Rate: **0,38 Episoden / 10 min**. Gesamte Nullzeit: **0,43 %** der
+  Trainingszeit.
+- Dauer: Median **5 s**, Mittel 6,2 s, p90 11,6 s, Max 25 s.
+  → Die Auto-Pause-Schwelle von 4 s (§6.14) greift beim Median gerade so;
+  Werte < 3 s würden reihenweise Fehlalarme auf langsamen Schlägen erzeugen.
+
+**Zwei verschiedene Ursachen — nicht verwechseln**
+
+1. *Echte Pause* (typisch 1-Hz-Sessions): `power` und `spm` gehen sauber auf
+   0, `distance` steht, und beim Wiederanrudern startet `spm` niedrig
+   (5–9 spm) mit kleiner Leistung. Genau der Fall, für den §6.14 gebaut ist.
+2. *BLE-Aussetzer / Resync* (typisch 4-Hz-Sessions): `distance` **springt**
+   beim Eintritt in die Null-Phase um 8–29 m (statt der üblichen 3 m), und
+   das erste Sample danach zeigt einen unrealistischen Peak
+   (185–327 W bei 102–123 s/500 m). 10 der 49 Episoden sehen so aus.
+   Diese Werte sind Artefakte — `max_power`/`best_pace` einer Session können
+   dadurch verfälscht sein.
+
+Erkennungsregel für (2): Distanzsprung beim Start der Null-Phase > 5 m **oder**
+Leistungssprung nach der Null-Phase > 2,5× des Werts davor.
+
 ## 5 · HTTP/WS-API
 
 ### Workouts
