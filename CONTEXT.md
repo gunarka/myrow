@@ -31,7 +31,7 @@ Keine Auth, keine Mandanten, keine Cloud.
 │    • parse_rower_data()  →  dict                         │
 │    • set_resistance()  →  FTMS Control Point write       │
 │    • ConnectionManager (WebSocket fan-out)               │
-│    • DuckDB CRUD: workouts, sessions, samples            │
+│    • DuckDB CRUD: workouts, sessions, samples, users, settings            │
 │    • Kinomap import (TCX/PWX/CSV/ZIP) via defusedxml     │
 └──────────┬───────────────────────────────┬───────────────┘
            │ HTTP / WS                     │ read/write
@@ -59,7 +59,7 @@ Single-process. Kein Build-Step. Eine eingebettete DuckDB-Datei.
 | `start.sh`              | Venv aktivieren + `python server.py` starten       | –        |
 | `config.example.json`   | Vorlage für `config.json` (leeres `ble_address`)   | –        |
 | `config.json`           | BLE-Adresse + Geräteparameter — **nicht im Repo**  | –        |
-| `woodrower.duckdb`      | DB (Workouts, Sessions, Samples) — **nicht im Repo** | wächst |
+| `woodrower.duckdb`      | DB (Workouts, Sessions, Samples, Users, Settings) — **nicht im Repo** | wächst |
 | `software.log`          | Protokoll der Software-Verwaltung (§6.17) — **nicht im Repo** (`*.log`) | wächst |
 | `requirements.txt`      | fastapi, uvicorn, bleak, duckdb, defusedxml, fit-tool, … | 7 Zeilen |
 | `.gitignore`            | schließt lokale Daten / venv / Exporte aus (§12)   | –        |
@@ -118,6 +118,15 @@ Aktive Sessions leben in `ActiveSession` im RAM und werden beim
 *Pause/Resume/Stop* oder beim Erreichen der `totalSec` finalisiert.
 Importierte Kinomap-Sessions setzen `completed=TRUE` und schreiben das
 Quellformat in `workout_snapshot`.
+
+Tabelle `users` (Nutzerprofile):
+`id` (PK, vom Client erzeugt), `name`, `dob` (ISO-Datum als Text), `weight`,
+`height`, `gender` (`male`/`female`/`other`), `efficiency` (%), `created_at`,
+`updated_at`. `sessions.user_id` verweist lose darauf (kein FK; beim Löschen
+eines Nutzers bleiben seine Sessions erhalten).
+
+Tabelle `settings` (Key/Value, Wert JSON-kodiert): erlaubte Schlüssel
+`active_user`, `dark_mode`, `autopause_idle_s` (`SETTING_KEYS` in `server.py`).
 
 ### 4.3 · WebSocket-Nachrichten (Server → Browser)
 
@@ -309,6 +318,16 @@ Leistungssprung nach der Null-Phase > 2,5× des Werts davor.
 | PUT     | `/api/workouts/{name}`     | speichern/überschreiben (mit Validation) |
 | DELETE  | `/api/workouts/{name}`     | löschen                           |
 
+### Nutzer & Einstellungen
+
+| Methode | Pfad                | Funktion                                             |
+|---------|---------------------|------------------------------------------------------|
+| GET     | `/api/users`        | alle Nutzerprofile (Reihenfolge = Anlegen)           |
+| PUT     | `/api/users/{id}`   | anlegen/überschreiben (`name` Pflicht; Zahlen werden geprüft) |
+| DELETE  | `/api/users/{id}`   | löschen                                              |
+| GET     | `/api/settings`     | alle Einstellungen als Map                           |
+| PUT     | `/api/settings`     | Teil-Update; unbekannte Schlüssel → 400, `null` löscht |
+
 ### Sessions
 
 | Methode | Pfad                          | Funktion                          |
@@ -431,10 +450,16 @@ Samples. Server-Endpoint cappt zusätzlich auf 20 MiB Upload.
 Query-String am `<script>`-Tag (`?v=YYYYMMDD`-Suffix) eingebaut — bei
 JS-Änderungen dort inkrementieren. **Kein Build-Step, keine Toolchain.**
 
-### 6.8 · Benutzerprofile in localStorage
+### 6.8 · Benutzerprofile in der DB
 Die App unterstützt mehrere Nutzerprofile (Name, Gewicht, Größe, Geburtsdatum,
-Geschlecht, Wirkungsgrad). Diese werden im Browser-`localStorage` (`wr_users`,
-`wr_active_user`) gehalten — **nicht** auf dem Server. Beim Session-Stop wird
+Geschlecht, Wirkungsgrad). Diese liegen in der DuckDB-Tabelle `users`, der aktive Nutzer in `settings`
+(`active_user`). Das Frontend hält sie in `store` (In-Memory-Cache, geladen in
+`bootstrapStore()` vor dem Start); `saveUsers()` schreibt Änderungen per
+`PUT`/`DELETE /api/users/{id}` zurück. **Es wird kein `localStorage` mehr
+genutzt.** `migrateLocalStorage()` übernimmt Altdaten (`wr_users`,
+`wr_active_user`, `wr_autopause_idle_s`, `darkMode`, `wr_session_meta`) einmalig
+in die DB und löscht danach die Keys; bei Fehlschlag wird beim nächsten Start
+erneut versucht. Beim Session-Stop wird
 `user_id` + Kaloriendaten per `PATCH /api/sessions/{id}/energy` in die DB
 geschrieben, damit der Verlauf dem richtigen Nutzer zugeordnet bleibt.
 
@@ -573,7 +598,7 @@ Verbindungsverlust —, die beide dieselbe Pause/Resume-Logik teilen:
   direkt nach dem Start/Resume sofort wieder pausiert werden.
 - **Einstellbare Schwelle**: `AUTO_PAUSE_IDLE_MS` ist kein `const` mehr,
   sondern ein modul-globales `let`, initialisiert aus
-  `loadAutoPauseIdleS() * 1000` (localStorage-Key `wr_autopause_idle_s`,
+  `loadAutoPauseIdleS() * 1000` (Setting `autopause_idle_s` in der DB,
   Default **4 s**). Admin-Tab-Feld `#autopause-idle-input` (2–30 s,
   0,5er-Schritte) schreibt bei `change` direkt in diese Variable — kein
   Seiten-Reload nötig, der nächste `updateDashboard()`-Tick nutzt sofort

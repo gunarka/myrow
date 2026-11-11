@@ -300,6 +300,27 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_samples_session
             ON samples (session_id);
         """)
+        # Nutzerprofile (früher: Browser-localStorage)
+        _db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id          VARCHAR PRIMARY KEY,
+                name        VARCHAR NOT NULL,
+                dob         VARCHAR,
+                weight      DOUBLE,
+                height      DOUBLE,
+                gender      VARCHAR,
+                efficiency  DOUBLE,
+                created_at  TIMESTAMP DEFAULT current_timestamp,
+                updated_at  TIMESTAMP DEFAULT current_timestamp
+            );
+        """)
+        # Einstellungen als Key/Value (Wert JSON-kodiert)
+        _db.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key   VARCHAR PRIMARY KEY,
+                value VARCHAR NOT NULL
+            );
+        """)
         # Migration: add columns introduced after initial schema
         for col, coltype in [
             ("max_spm",       "DOUBLE"),
@@ -396,6 +417,69 @@ def db_save_workout(name: str, definition: dict[str, Any]) -> None:
 def db_delete_workout(name: str) -> None:
     with _db_lock:
         db().execute("DELETE FROM workouts WHERE name = ?", [name])
+
+
+# ----- user & settings CRUD -----
+
+USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+USER_TEXT_FIELDS = ("name", "dob", "gender")
+USER_NUM_FIELDS = ("weight", "height", "efficiency")
+# Erlaubte Einstellungen (Schlüssel -> Prüffunktion)
+SETTING_KEYS = {"active_user", "dark_mode", "autopause_idle_s"}
+
+
+def db_list_users() -> list[dict[str, Any]]:
+    cols = ["id", "name", "dob", "weight", "height", "gender", "efficiency"]
+    with _db_lock:
+        rows = db().execute(
+            f"SELECT {','.join(cols)} FROM users ORDER BY created_at, id"
+        ).fetchall()
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def db_save_user(uid: str, data: dict[str, Any]) -> None:
+    vals = [data.get(k) for k in USER_TEXT_FIELDS] + \
+           [data.get(k) for k in USER_NUM_FIELDS]
+    with _db_lock:
+        db().execute(
+            "INSERT INTO users (id, name, dob, gender, weight, height, "
+            "efficiency) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (id) DO UPDATE SET name = excluded.name, "
+            "dob = excluded.dob, gender = excluded.gender, "
+            "weight = excluded.weight, height = excluded.height, "
+            "efficiency = excluded.efficiency, updated_at = now()",
+            [uid, *vals],
+        )
+
+
+def db_delete_user(uid: str) -> None:
+    with _db_lock:
+        db().execute("DELETE FROM users WHERE id = ?", [uid])
+
+
+def db_get_settings() -> dict[str, Any]:
+    with _db_lock:
+        rows = db().execute("SELECT key, value FROM settings").fetchall()
+    out: dict[str, Any] = {}
+    for k, v in rows:
+        try:
+            out[k] = json.loads(v)
+        except json.JSONDecodeError:
+            pass
+    return out
+
+
+def db_set_settings(updates: dict[str, Any]) -> None:
+    with _db_lock:
+        for k, v in updates.items():
+            if v is None:
+                db().execute("DELETE FROM settings WHERE key = ?", [k])
+            else:
+                db().execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    [k, json.dumps(v)],
+                )
 
 
 # ----- session CRUD -----
@@ -1821,6 +1905,54 @@ async def api_session_energy(session_id: int, body: dict[str, Any]):
         body.get("exercise_kcal"),
         body.get("total_kcal"),
     )
+    return {"ok": True}
+
+
+# ----- users & settings -----
+
+@app.get("/api/users")
+async def api_users_list():
+    return db_list_users()
+
+
+@app.put("/api/users/{uid}")
+async def api_users_put(uid: str, body: dict[str, Any]):
+    if not USER_ID_RE.match(uid):
+        raise HTTPException(400, "invalid user id")
+    name = str(body.get("name") or "").strip()
+    if not name or len(name) > 200:
+        raise HTTPException(400, "name required (max 200 chars)")
+    data: dict[str, Any] = {"name": name}
+    for k in ("dob", "gender"):
+        v = body.get(k)
+        data[k] = str(v)[:32] if v else None
+    for k in USER_NUM_FIELDS:
+        v = body.get(k)
+        try:
+            data[k] = float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{k} must be a number")
+    db_save_user(uid, data)
+    return {"ok": True}
+
+
+@app.delete("/api/users/{uid}")
+async def api_users_delete(uid: str):
+    db_delete_user(uid)
+    return {"ok": True}
+
+
+@app.get("/api/settings")
+async def api_settings_get():
+    return db_get_settings()
+
+
+@app.put("/api/settings")
+async def api_settings_put(body: dict[str, Any]):
+    unknown = set(body) - SETTING_KEYS
+    if unknown:
+        raise HTTPException(400, f"unknown settings: {sorted(unknown)}")
+    db_set_settings(body)
     return {"ok": True}
 
 

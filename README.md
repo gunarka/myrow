@@ -23,8 +23,8 @@ zuführen und im Verlauf auszuwerten.
   Bluetooth-Verbindung weg, versucht der Server automatisch neu zu
   verbinden (bekanntes Verbindungs-Overlay) — auch hier läuft es beim
   nächsten Ruderschlag einfach weiter. Die Wartezeit bis zur Auto-Pause
-  (Default 4 s) lässt sich im **Admin**-Tab einstellen und wird im
-  Browser gespeichert.
+  (Default 4 s) lässt sich im **Admin**-Tab einstellen und wird in der
+  Datenbank gespeichert.
 - **Trainingsende-Overlay** – ist ein definiertes Training komplett
   durchlaufen, erscheint ein Glückwunsch-Overlay mit den Kennzahlen der
   Session (Dauer, Distanz, ⌀ Leistung/Schlagzahl/Pace/Puls, Kalorien).
@@ -42,7 +42,7 @@ zuführen und im Verlauf auszuwerten.
   found"-Fehler beim Reconnect deutlich reduziert; bei anhaltenden
   Problemen wiederholt der Server mit wachsender Pause automatisch.
 - **Mehrere Nutzerprofile** – Name, Gewicht, Größe, Geburtsdatum und
-  Wirkungsgrad werden lokal im Browser gespeichert; Kalorien werden je
+  Wirkungsgrad werden in der Datenbank (`users`) gespeichert; Kalorien werden je
   Session dem gewählten Nutzer zugeordnet.
 - **Verlauf & Statistik** – jede Session landet automatisch in einer
   DuckDB neben `server.py`; mit GitHub-Style-Heatmap, persönlichen
@@ -225,8 +225,10 @@ WOODROWER_HOST=0.0.0.0 python server.py
 6. **Beenden** (oben rechts in der Navigationsleiste) fährt den Server
    sauber herunter und schließt den Tab.
 
-Die Trainings und Sessions werden in `woodrower.duckdb` neben
-`server.py` gespeichert. Ein altes `workouts.json` wird beim ersten
+Trainings, Sessions, Nutzerprofile und Einstellungen (aktiver Nutzer, Dark Mode,
+Auto-Pause-Zeit) werden in `woodrower.duckdb` neben `server.py` gespeichert.
+Alte Browserdaten (localStorage) übernimmt die App beim ersten Start nach dem
+Update automatisch in die Datenbank. Ein altes `workouts.json` wird beim ersten
 Start automatisch eingelesen und bleibt als Backup liegen.
 
 Die BLE-Adresse des Rudergeräts und gerätespezifische Parameter

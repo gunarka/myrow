@@ -50,6 +50,78 @@ function escapeHtml(s) {
   }[c]));
 }
 
+// ---------- persistent store (DuckDB via API) ----------
+// Nutzer, Einstellungen und Session-Meta liegen in der DB; hier nur ein
+// In-Memory-Cache, der beim Start geladen wird (bootstrapStore()).
+const store = { users: [], settings: {}, sessionMeta: {} };
+
+async function apiJson(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return await r.json();
+}
+function apiPutJson(url, body, method = "PUT") {
+  return apiJson(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+function saveSetting(key, value) {
+  store.settings[key] = value;
+  apiPutJson("/api/settings", { [key]: value })
+    .catch(e => console.warn("Einstellung nicht gespeichert:", e));
+}
+
+// Einmalige Übernahme alter Browser-Daten (localStorage) in die DB.
+async function migrateLocalStorage() {
+  const LS = window.localStorage;
+  const keys = ["wr_users", "wr_active_user", "wr_autopause_idle_s",
+                "darkMode", "wr_session_meta"];
+  if (!keys.some(k => LS.getItem(k) !== null)) return;
+  try {
+    const old = JSON.parse(LS.getItem("wr_users") || "[]");
+    for (const u of old) {
+      if (store.users.some(x => x.id === u.id)) continue;
+      await apiPutJson(`/api/users/${encodeURIComponent(u.id)}`, u);
+    }
+    const settings = {};
+    if (LS.getItem("wr_active_user")) settings.active_user = LS.getItem("wr_active_user");
+    const ap = parseFloat(LS.getItem("wr_autopause_idle_s"));
+    if (Number.isFinite(ap) && ap > 0) settings.autopause_idle_s = ap;
+    if (LS.getItem("darkMode") !== null) settings.dark_mode = LS.getItem("darkMode") === "1";
+    // Bereits in der DB vorhandene Einstellungen nicht überschreiben
+    for (const k of Object.keys(settings)) if (k in store.settings) delete settings[k];
+    if (Object.keys(settings).length) await apiPutJson("/api/settings", settings);
+    const meta = JSON.parse(LS.getItem("wr_session_meta") || "{}");
+    for (const [sid, m] of Object.entries(meta)) {
+      if (m && m.total_kcal != null) {
+        await apiPatchSessionEnergy(sid, {
+          user_id: m.user_id ?? null, bmr_kcal: m.bmr_kcal,
+          exercise_kcal: m.exercise_kcal, total_kcal: m.total_kcal,
+        });
+      }
+    }
+    keys.forEach(k => LS.removeItem(k));
+    console.info("localStorage-Daten in die DB übernommen");
+  } catch (e) {
+    console.warn("Migration aus localStorage fehlgeschlagen (wird beim nächsten Start erneut versucht):", e);
+  }
+}
+
+async function bootstrapStore() {
+  try {
+    [store.users, store.settings] = await Promise.all([
+      apiJson("/api/users"), apiJson("/api/settings"),
+    ]);
+    await migrateLocalStorage();
+    store.users    = await apiJson("/api/users");
+    store.settings = await apiJson("/api/settings");
+  } catch (e) {
+    console.warn("Profile/Einstellungen konnten nicht geladen werden:", e);
+  }
+}
+
 // ---------- BLE state + overlay ----------
 const bleState = { connected: false };
 let bleRetryTimer  = null;   // setInterval handle for the retry countdown
@@ -745,15 +817,14 @@ const dash = {
 };
 
 // No stroke for this long while running → auto-pause training + recording.
-// Configurable in the Admin tab (persisted in localStorage); default matches
+// Configurable in the Admin tab (persisted in the DB, table settings); default matches
 // one slow stroke cycle (~4s at ~15 spm) plus a small safety margin so a
 // normal pause between two strokes never triggers it by accident.
-const AUTO_PAUSE_IDLE_KEY = "wr_autopause_idle_s";
 const AUTO_PAUSE_IDLE_DEFAULT_S = 4;
 const AUTO_PAUSE_IDLE_MIN_S = 2;
 const AUTO_PAUSE_IDLE_MAX_S = 30;
 function loadAutoPauseIdleS() {
-  const v = parseFloat(localStorage.getItem(AUTO_PAUSE_IDLE_KEY));
+  const v = parseFloat(store.settings.autopause_idle_s);
   return (Number.isFinite(v) && v > 0) ? v : AUTO_PAUSE_IDLE_DEFAULT_S;
 }
 let AUTO_PAUSE_IDLE_MS = loadAutoPauseIdleS() * 1000;
@@ -1335,7 +1406,7 @@ async function renderHistory() {
     ? fmtPace(stats.totals.avg_pace) + " /500 m" : "–";
   $("#a-spm").textContent    = stats.totals.avg_spm != null
     ? stats.totals.avg_spm.toFixed(1) + " spm" : "–";
-  // Sum total_kcal from DB; fall back to localStorage for sessions without DB energy
+  // Sum total_kcal from DB; fall back to in-memory cache for sessions without DB energy
   const _smeta = loadSessionMeta();
   const _dbKcal = sessions.reduce((sum, s) => sum + (s.total_kcal || 0), 0);
   const _lsKcal = _dbKcal === 0
@@ -1477,7 +1548,7 @@ function renderRecentSessions(sessions) {
   const sessionRow = s => {
     const d   = new Date(s.started_at);
     const day = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-    // Prefer DB-stored values; fall back to localStorage for old sessions
+    // Prefer DB-stored values; fall back to in-memory cache for just-finished sessions
     const sm       = smeta[s.id];
     const userId   = s.user_id       ?? sm?.user_id       ?? null;
     const bmrKcal  = s.bmr_kcal      ?? sm?.bmr_kcal      ?? null;
@@ -1544,7 +1615,7 @@ function renderSessionDetail(s) {
   $("#sd-name").textContent = s.workout_name || "Freies Training";
   const status = s.completed ? "abgeschlossen" : "abgebrochen";
 
-  // Prefer DB-stored energy/user; fall back to localStorage for old sessions
+  // Prefer DB-stored energy/user; fall back to in-memory cache for just-finished sessions
   const sm      = loadSessionMeta()[s.id];
   const userId  = s.user_id  ?? sm?.user_id  ?? null;
   const bmrKcal = s.bmr_kcal ?? sm?.bmr_kcal ?? null;
@@ -2593,12 +2664,9 @@ async function apiImportSession(file) {
 })();
 
 // ---------- energy calculation ----------
-const SESSION_META_KEY = "wr_session_meta";
-
-function loadSessionMeta() {
-  try { return JSON.parse(localStorage.getItem(SESSION_META_KEY)) || {}; } catch { return {}; }
-}
-function saveSessionMeta(m) { localStorage.setItem(SESSION_META_KEY, JSON.stringify(m)); }
+// Nur In-Memory-Cache für sofortige Anzeige; die Daten liegen in der DB (sessions).
+function loadSessionMeta() { return store.sessionMeta; }
+function saveSessionMeta(m) { store.sessionMeta = m; }
 
 function calcSessionEnergy(durationSec, avgPower, profile) {
   if (!profile?.weight || !durationSec) return null;
@@ -2641,7 +2709,7 @@ function recordSessionEnergy(sessionId, userId) {
     : getProfile();
   const avgPower  = dash.sums.n > 0 ? dash.sums.watt / dash.sums.n : 0;
   const energy    = calcSessionEnergy(Math.round(elapsedSec()), avgPower, profile);
-  // Cache in localStorage for immediate display
+  // Cache in memory for immediate display
   const meta      = loadSessionMeta();
   meta[sessionId] = { user_id: userId || null, ...(energy || {}) };
   saveSessionMeta(meta);
@@ -2956,15 +3024,26 @@ $("#btn-sw-restart").onclick = async () => {
 };
 
 // ---------- admin / user management ----------
-const USERS_KEY       = "wr_users";
-const ACTIVE_USER_KEY = "wr_active_user";
-
-function loadUsers() {
-  try { return JSON.parse(localStorage.getItem(USERS_KEY)) || []; } catch { return []; }
+function loadUsers() { return store.users; }
+// Cache ersetzen und Unterschiede (neu/geändert/gelöscht) in die DB schreiben.
+function saveUsers(next) {
+  const prev = store.users;
+  store.users = next;
+  const failed = e => { console.warn(e); alert("Benutzer konnte nicht gespeichert werden."); };
+  for (const u of next) {
+    const old = prev.find(p => p.id === u.id);
+    if (!old || JSON.stringify(old) !== JSON.stringify(u)) {
+      apiPutJson(`/api/users/${encodeURIComponent(u.id)}`, u).catch(failed);
+    }
+  }
+  for (const p of prev) {
+    if (!next.some(u => u.id === p.id)) {
+      apiJson(`/api/users/${encodeURIComponent(p.id)}`, { method: "DELETE" }).catch(failed);
+    }
+  }
 }
-function saveUsers(u) { localStorage.setItem(USERS_KEY, JSON.stringify(u)); }
-function getActiveUserId() { return localStorage.getItem(ACTIVE_USER_KEY) || null; }
-function setActiveUserId(id) { localStorage.setItem(ACTIVE_USER_KEY, id); }
+function getActiveUserId() { return store.settings.active_user || null; }
+function setActiveUserId(id) { saveSetting("active_user", id || null); }
 function getProfile() {
   const users = loadUsers(), id = getActiveUserId();
   return users.find(u => u.id === id) || users[0] || null;
@@ -3181,38 +3260,44 @@ window.addEventListener("beforeunload", () => {
   }
 });
 
-// ---------- dark mode ----------
-(function () {
+// ---------- dark mode (Einstellung in der DB) ----------
+function initDarkMode() {
   const toggle = document.getElementById("dark-mode-toggle");
   function applyTheme(dark) {
     document.documentElement.dataset.theme = dark ? "dark" : "";
     if (toggle) toggle.checked = dark;
   }
-  applyTheme(localStorage.getItem("darkMode") === "1");
+  applyTheme(store.settings.dark_mode === true);
   if (toggle) {
     toggle.addEventListener("change", () => {
       const dark = toggle.checked;
-      localStorage.setItem("darkMode", dark ? "1" : "0");
+      saveSetting("dark_mode", dark);
       applyTheme(dark);
     });
   }
-})();
+}
 
-// ---------- auto-pause idle threshold ----------
-(function () {
+// ---------- auto-pause idle threshold (Einstellung in der DB) ----------
+function initAutoPauseSetting() {
   const input = document.getElementById("autopause-idle-input");
   if (!input) return;
+  AUTO_PAUSE_IDLE_MS = loadAutoPauseIdleS() * 1000;
   input.value = loadAutoPauseIdleS();
   input.addEventListener("change", () => {
     let v = parseFloat(input.value);
     if (!Number.isFinite(v) || v <= 0) v = AUTO_PAUSE_IDLE_DEFAULT_S;
     v = Math.min(AUTO_PAUSE_IDLE_MAX_S, Math.max(AUTO_PAUSE_IDLE_MIN_S, v));
     input.value = v;
-    localStorage.setItem(AUTO_PAUSE_IDLE_KEY, String(v));
+    saveSetting("autopause_idle_s", v);
     AUTO_PAUSE_IDLE_MS = v * 1000;
   });
-})();
+}
 
 // ---------- boot ----------
-showView("list");
-updateDashboard();
+(async function boot() {
+  await bootstrapStore();
+  initDarkMode();
+  initAutoPauseSetting();
+  showView("list");
+  updateDashboard();
+})();
