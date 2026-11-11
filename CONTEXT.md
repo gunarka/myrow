@@ -76,6 +76,12 @@ ignoriert (persönliche Einstellungen), die projektweite `settings.json` nicht.
 
 ### 4.1 · Workout (Plan)
 
+Tabelle `workouts`: `id` (PK, UUID-Hex), `name` (frei wählbar, nicht
+eindeutig), `definition` (JSON, siehe unten), `created_at`, `updated_at`.
+Beim Start wandelt `_migrate_workouts_to_ids()` eine alte, nach Namen
+geschlüsselte Tabelle automatisch um (neue IDs, Namen/Definitionen bleiben).
+Das JSON unten ist nur die `definition`; der Name steht in der Spalte `name`.
+
 ```jsonc
 {
   "Pyramide 5×": {
@@ -106,7 +112,7 @@ werden beim Öffnen im Editor genauso gelesen (`rPct = resistance_pct ?? watts`)
 ### 4.2 · Session (aufgezeichnetes Training)
 
 Tabelle `sessions` (Aggregate):
-`id, workout_name, workout_snapshot, started_at, ended_at, duration_s,
+`id, workout_name, workout_id, workout_snapshot, started_at, ended_at, duration_s,
 total_distance, avg_power, max_power, avg_spm, avg_pace, avg_hr,
 total_energy, completed, max_spm, max_hr, best_pace,
 bmr_kcal, exercise_kcal, total_kcal, user_id`.
@@ -313,10 +319,16 @@ Leistungssprung nach der Null-Phase > 2,5× des Werts davor.
 | Methode | Pfad                       | Funktion                          |
 |---------|----------------------------|-----------------------------------|
 | GET     | `/`                        | SPA ausliefern                    |
-| GET     | `/api/workouts`            | alle Trainings als Map            |
-| GET     | `/api/workouts/{name}`     | einzelnes Training                |
-| PUT     | `/api/workouts/{name}`     | speichern/überschreiben (mit Validation) |
-| DELETE  | `/api/workouts/{name}`     | löschen                           |
+| GET     | `/api/workouts`            | alle Trainings als Liste `[{id, name, definition}]` (zuletzt geändert zuerst) |
+| GET     | `/api/workouts/{id}`       | einzelnes Training `{id, name, definition}` |
+| POST    | `/api/workouts`            | neu anlegen, Body `{name, definition}` → `{id}` (mit Validation) |
+| PUT     | `/api/workouts/{id}`       | ändern (Name + Definition), 404 bei unbekannter ID |
+| DELETE  | `/api/workouts/{id}`       | löschen                           |
+
+Trainings werden über eine serverseitig erzeugte **ID** (`uuid4().hex`)
+identifiziert, nicht über den Namen. Gleiche Namen sind erlaubt und
+überschreiben sich nicht; die Liste zeigt bei Namensdubletten eine
+Kurz-ID (`ID abc123`) als Unterscheidung.
 
 ### Nutzer & Einstellungen
 
@@ -916,7 +928,7 @@ curl -F "file=@deine_kinomap_datei.zip" http://localhost:8000/api/sessions/impor
 - Mobile-Layout der Dashboard-Top-Leiste (Distanz + Zeit untereinander
   auf schmalen Screens).
 - "Letzten Stand fortsetzen"-Button auf der Liste.
-- Workouts duplizieren.
+- Workouts duplizieren (dank IDs ohne Namenskonflikt möglich).
 - CSV-Export einzelner Sessions (Samples liegen in der DB).
 
 ## 10 · Tests

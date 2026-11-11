@@ -196,6 +196,8 @@ WOODROWER_HOST=0.0.0.0 python server.py
 ## Bedienung
 
 1. **Trainings** → *+ Neues Training* → Schritte definieren → *Speichern*.
+   Jedes Training hat eine eigene ID; gleiche Namen sind erlaubt und
+   überschreiben sich nicht (bei Dubletten zeigt die Liste eine Kurz-ID).
 2. In der Trainingsliste auf ▶ **Start** klicken.
 3. Im Dashboard Nutzer auswählen, dann mit ▶ den Timer starten.
    ✕ geht zurück zur Liste (und speichert das bisher Trainierte). Mit ⏸
@@ -227,6 +229,8 @@ WOODROWER_HOST=0.0.0.0 python server.py
 
 Trainings, Sessions, Nutzerprofile und Einstellungen (aktiver Nutzer, Dark Mode,
 Auto-Pause-Zeit) werden in `woodrower.duckdb` neben `server.py` gespeichert.
+Bestehende, nach Namen gespeicherte Trainings werden beim ersten Start
+automatisch auf IDs umgestellt.
 Alte Browserdaten (localStorage) übernimmt die App beim ersten Start nach dem
 Update automatisch in die Datenbank. Ein altes `workouts.json` wird beim ersten
 Start automatisch eingelesen und bleibt als Backup liegen.
