@@ -47,14 +47,17 @@ import logging
 import math
 import os
 import random
+import re
 import signal
 import struct
 import subprocess
+import sys
 import threading
 import time
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
@@ -2258,6 +2261,196 @@ async def api_ble_scan():
     return result
 
 
+# ----- software / library management -----
+
+SOFTWARE_LOG = BASE_DIR / "software.log"          # *.log is gitignored
+REQUIREMENTS_FILE = BASE_DIR / "requirements.txt"
+_PKG_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_pip_lock = threading.Lock()                        # one pip process at a time
+
+
+def _norm_pkg(name: str) -> str:
+    """PEP 503 name normalisation (case/underscore/dot-insensitive)."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _direct_requirements() -> list[str]:
+    """Package names listed in requirements.txt (extras/specifiers stripped)."""
+    try:
+        lines = REQUIREMENTS_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    names: list[str] = []
+    for line in lines:
+        m = _PKG_NAME_RE.match(line.split("#", 1)[0].strip())
+        if m:
+            names.append(m.group(0))
+    return names
+
+
+def _installed_version(name: str) -> str | None:
+    try:
+        return importlib_metadata.version(name)
+    except importlib_metadata.PackageNotFoundError:
+        return None
+
+
+def _run_pip(*args: str, timeout: int = 120) -> tuple[int, str, str]:
+    """Run `python -m pip …` with the interpreter that runs the server."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"Zeitüberschreitung nach {timeout} s"
+    except OSError as e:
+        return 127, "", str(e)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _version_bump(old: str, new: str) -> str:
+    """Rough size of an update: major / minor / patch / other."""
+    def nums(v: str) -> list[int]:
+        return ([int(x) for x in re.findall(r"\d+", v)[:3]] + [0, 0, 0])[:3]
+    for label, a, b in zip(("major", "minor", "patch"), nums(old), nums(new)):
+        if a != b:
+            return label
+    return "other"
+
+
+def _log_software(action: str, detail: str) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with SOFTWARE_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {action}: {detail}\n")
+    except OSError as e:
+        log.warning("could not write %s: %s", SOFTWARE_LOG, e)
+
+
+@app.get("/api/software")
+async def api_software_info():
+    """Environment info + the direct dependencies from requirements.txt."""
+    rc, out, _ = await asyncio.to_thread(_run_pip, "--version", timeout=20)
+    return {
+        "python":     sys.version.split()[0],
+        "executable": sys.executable,
+        "venv":       sys.prefix != sys.base_prefix,
+        "pip":        out.strip() if rc == 0 else None,
+        "direct": [
+            {"name": n, "version": _installed_version(n)}
+            for n in _direct_requirements()
+        ],
+    }
+
+
+@app.post("/api/software/check")
+async def api_software_check():
+    """Ask PyPI (via pip) which installed packages have a newer release."""
+    if not _pip_lock.acquire(blocking=False):
+        raise HTTPException(409, "Ein anderer pip-Vorgang läuft noch.")
+    try:
+        rc, out, err = await asyncio.to_thread(
+            _run_pip, "list", "--outdated", "--format=json",
+            "--disable-pip-version-check", timeout=180,
+        )
+    finally:
+        _pip_lock.release()
+    if rc != 0:
+        raise HTTPException(502, f"pip-Abfrage fehlgeschlagen: {err.strip()[-300:] or rc}")
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        raise HTTPException(502, "pip lieferte keine auswertbare Ausgabe.")
+    direct = {_norm_pkg(n) for n in _direct_requirements()}
+    outdated = [
+        {
+            "name":    r["name"],
+            "version": r["version"],
+            "latest":  r["latest_version"],
+            "direct":  _norm_pkg(r["name"]) in direct,
+            "bump":    _version_bump(r["version"], r["latest_version"]),
+        }
+        for r in rows
+    ]
+    outdated.sort(key=lambda r: (not r["direct"], r["name"].lower()))
+    _log_software("CHECK", f"{len(outdated)} veraltet")
+    return {"checked_at": datetime.now().isoformat(timespec="seconds"), "outdated": outdated}
+
+
+def _update_packages(names: list[str]) -> list[dict[str, Any]]:
+    results = []
+    for name in names:
+        before = _installed_version(name)
+        rc, _, err = _run_pip(
+            "install", "--upgrade", "--disable-pip-version-check", name, timeout=600,
+        )
+        after = _installed_version(name)
+        ok = rc == 0
+        msg = "" if ok else (err.strip().splitlines() or [f"Exit-Code {rc}"])[-1][:300]
+        _log_software("UPDATE" if ok else "UPDATE-FEHLER",
+                      f"{name} {before} -> {after}" + (f" ({msg})" if msg else ""))
+        results.append({"name": name, "ok": ok, "before": before, "after": after, "error": msg})
+    return results
+
+
+@app.post("/api/software/update")
+async def api_software_update(body: dict[str, Any]):
+    """Upgrade the given (already installed) packages with pip."""
+    names = body.get("packages")
+    if (not isinstance(names, list) or not names or len(names) > 100
+            or not all(isinstance(n, str) for n in names)):
+        raise HTTPException(400, "packages must be a non-empty list of names")
+    if active.id is not None:
+        raise HTTPException(409, "Es läuft gerade ein Training – bitte zuerst beenden.")
+    # Only names of really installed distributions are passed to pip, so the
+    # request cannot smuggle in options or arbitrary requirement specifiers.
+    installed = {
+        _norm_pkg(d.metadata["Name"]): d.metadata["Name"]
+        for d in importlib_metadata.distributions() if d.metadata["Name"]
+    }
+    clean: list[str] = []
+    for n in names:
+        real = installed.get(_norm_pkg(n)) if _PKG_NAME_RE.fullmatch(n) else None
+        if real is None:
+            raise HTTPException(400, f"Unbekanntes Paket: {n}")
+        if real not in clean:
+            clean.append(real)
+    if not _pip_lock.acquire(blocking=False):
+        raise HTTPException(409, "Ein anderer pip-Vorgang läuft noch.")
+    try:
+        results = await asyncio.to_thread(_update_packages, clean)
+    finally:
+        _pip_lock.release()
+    return {"results": results, "restart_required": any(r["ok"] and r["before"] != r["after"] for r in results)}
+
+
+@app.get("/api/software/log")
+async def api_software_log(lines: int = 60):
+    try:
+        text = SOFTWARE_LOG.read_text(encoding="utf-8")
+    except OSError:
+        return {"log": ""}
+    return {"log": "\n".join(text.splitlines()[-max(1, min(lines, 500)):])}
+
+
+@app.post("/api/software/restart")
+async def api_software_restart():
+    """Re-exec the server so updated libraries are loaded. Same host/port/args;
+    no new browser tab is opened (WOODROWER_NO_BROWSER)."""
+    if active.id is not None:
+        raise HTTPException(409, "Es läuft gerade ein Training – bitte zuerst beenden.")
+
+    def _restart() -> None:
+        log.info("restarting server (software update)")
+        close_db()
+        os.environ["WOODROWER_NO_BROWSER"] = "1"
+        os.execv(sys.executable, [sys.executable, str(BASE_DIR / "server.py"), *sys.argv[1:]])
+
+    asyncio.get_running_loop().call_later(0.5, _restart)
+    return {"ok": True}
+
+
 # ----- websocket -----
 
 @app.websocket("/ws")
@@ -2286,5 +2479,6 @@ if __name__ == "__main__":
         "(localhost only)" if HOST in ("127.0.0.1", "localhost", "::1")
         else "(EXPOSED on the network — no auth!)"
     )
-    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    if os.environ.get("WOODROWER_NO_BROWSER", "0") != "1":
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

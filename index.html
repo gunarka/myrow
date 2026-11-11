@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Woodrower Trainer</title>
-<link rel="stylesheet" href="/static/style.css?v=20260911b" />
+<link rel="stylesheet" href="/static/style.css?v=20261110a" />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚣</text></svg>" />
 </head>
 <body>
@@ -352,6 +352,35 @@
       </div>
 
       <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+        <h3 style="margin:0 0 6px;font-size:15px">Software &amp; Bibliotheken</h3>
+        <div id="sw-env" class="sw-env">Lade…</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0">
+          <button id="btn-sw-check" class="ghost">🔍 Auf Updates prüfen</button>
+          <button id="btn-sw-update" disabled>⬆ Aktualisieren</button>
+          <span id="sw-status" style="font-size:13px;color:var(--muted)"></span>
+        </div>
+        <div id="sw-restart" class="sw-banner" hidden>
+          <span>Aktualisierte Pakete wirken erst nach einem Neustart des Servers.</span>
+          <button id="btn-sw-restart">↻ Server neu starten</button>
+        </div>
+        <div id="sw-result" class="sw-result" hidden></div>
+        <table class="sw-table" id="sw-direct"></table>
+        <details id="sw-deps" hidden>
+          <summary id="sw-deps-sum"></summary>
+          <table class="sw-table" id="sw-deps-table"></table>
+        </details>
+        <details id="sw-log-wrap" style="margin-top:10px">
+          <summary style="font-size:13px;cursor:pointer">Protokoll</summary>
+          <pre id="sw-log" class="sw-log"></pre>
+        </details>
+        <p style="font-size:12px;color:var(--muted);margin:8px 0 0">
+          Direkte Pakete stammen aus <code>requirements.txt</code>; Abhängigkeiten dieser Pakete stehen darunter
+          und sind standardmäßig nicht vorausgewählt. <b>Major</b>-Updates können inkompatibel sein.
+          Während eines Trainings ist kein Update möglich.
+        </p>
+      </div>
+
+      <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
         <h3 style="margin:0 0 10px;font-size:15px">Export</h3>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
           <button id="btn-export-all" class="ghost" style="font-size:13px">Alle auswählen</button>
@@ -489,6 +518,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260911e"></script>
+<script src="/static/app.js?v=20261110a"></script>
 </body>
 </html>

@@ -1,7 +1,7 @@
 # CONTEXT.md — Woodrower Trainer
 
 > Briefing für Claude Code (oder jeden anderen, der hier weiterbaut).
-> Stand: September 2026. Zuletzt aktualisiert: 2026-09-17.
+> Stand: November 2026. Zuletzt aktualisiert: 2026-11-10.
 > Repo: <https://github.com/gunarka/myrow> (Branch `main`, siehe §12).
 
 ## 1 · Worum geht's
@@ -51,15 +51,16 @@ Single-process. Kein Build-Step. Eine eingebettete DuckDB-Datei.
 
 | Datei                   | Zweck                                              | Größe    |
 |-------------------------|----------------------------------------------------|----------|
-| `server.py`             | FastAPI-Backend, FTMS-Parser, WS, DuckDB-Layer     | ~2290 Z  |
+| `server.py`             | FastAPI-Backend, FTMS-Parser, WS, DuckDB-Layer, Software-Verwaltung | ~2490 Z  |
 | `kinomap_import.py`     | TCX/PWX/CSV/ZIP-Parser für Kinomap-Exporte         | ~489 Z   |
 | `index.html`            | SPA-Shell (nur HTML), lädt static/                 | ~494 Z   |
-| `static/app.js`         | Gesamte SPA-Logik (alle Views, WS, Canvas-Chart)   | ~3030 Z  |
-| `static/style.css`      | Alle CSS-Regeln (inkl. Dark Mode)                  | ~594 Z   |
+| `static/app.js`         | Gesamte SPA-Logik (alle Views, WS, Canvas-Chart)   | ~3180 Z  |
+| `static/style.css`      | Alle CSS-Regeln (inkl. Dark Mode)                  | ~613 Z   |
 | `start.sh`              | Venv aktivieren + `python server.py` starten       | –        |
 | `config.example.json`   | Vorlage für `config.json` (leeres `ble_address`)   | –        |
 | `config.json`           | BLE-Adresse + Geräteparameter — **nicht im Repo**  | –        |
 | `woodrower.duckdb`      | DB (Workouts, Sessions, Samples) — **nicht im Repo** | wächst |
+| `software.log`          | Protokoll der Software-Verwaltung (§6.17) — **nicht im Repo** (`*.log`) | wächst |
 | `requirements.txt`      | fastapi, uvicorn, bleak, duckdb, defusedxml, fit-tool, … | 7 Zeilen |
 | `.gitignore`            | schließt lokale Daten / venv / Exporte aus (§12)   | –        |
 | `.claude/settings.json` | Claude-Code-Berechtigungen, **versioniert**        | –        |
@@ -343,6 +344,16 @@ Leistungssprung nach der Null-Phase > 2,5× des Werts davor.
 | GET     | `/api/export/fit?ids=1,2,…`   | Sessions als FIT; mehrere → ZIP                       |
 
 `ids` ist eine kommagetrennte Liste von Session-IDs. Ohne Parameter werden alle Sessions exportiert. Einzel-Export liefert die Datei direkt; Multi-Export liefert ein ZIP-Archiv.
+
+### Software-Verwaltung (siehe §6.17)
+
+| Methode | Pfad                      | Funktion                                                      |
+|---------|---------------------------|---------------------------------------------------------------|
+| GET     | `/api/software`           | Python-/pip-Version, venv-Flag, direkte Pakete + Version      |
+| POST    | `/api/software/check`     | `pip list --outdated` → `[{name, version, latest, direct, bump}]` |
+| POST    | `/api/software/update`    | Body `{packages:[…]}`; `pip install --upgrade` je Paket; 409 bei laufendem Training/pip |
+| GET     | `/api/software/log?lines=N` | letzte N Zeilen aus `software.log`                          |
+| POST    | `/api/software/restart`   | Server per `os.execv` neu starten; 409 bei laufendem Training |
 
 ### BLE-Verwaltung
 
@@ -641,6 +652,36 @@ mit CSS-Overlays zuerst `backdrop-filter`/Filter-Effekte prüfen, bevor an
 der JS-Redraw-Frequenz gedreht wird — Canvas-Redraws ohne Filter-Overlay
 sind bei dieser Chartgröße kein messbares Problem.
 
+### 6.17 · Software-Verwaltung (Admin-Tab)
+Portiert aus dem Schwesterprojekt `myfin` (dort Streamlit, hier FastAPI + Vanilla-JS).
+Umfang bewusst klein: Updates **prüfen** und **einspielen**, kein Install/Uninstall.
+
+- **Direkt vs. transitiv:** Als „direkt" gilt, was in `requirements.txt`
+  steht (`_direct_requirements()`, Extras/Specifier abgeschnitten, Namen per
+  PEP 503 normalisiert). Direkte Pakete stehen immer in der Tabelle
+  (auch vor dem Check) und sind nach dem Check vorausgewählt; veraltete
+  Abhängigkeiten stehen in einem `<details>` und sind **nicht** vorausgewählt.
+- **Check:** `pip list --outdated --format=json` (braucht Netz, bis 180 s).
+  `bump` (`major`/`minor`/`patch`/`other`) ist nur eine grobe Ziffernrechnung
+  (`_version_bump()`), kein SemVer-Parser; `major` löst im Frontend eine
+  Rückfrage aus.
+- **Update-Sicherheit:** Der Endpoint akzeptiert nur Namen **installierter**
+  Distributionen (Abgleich über `importlib.metadata`, Regex `_PKG_NAME_RE`),
+  übergibt pip also nie freie Strings/Optionen. Ein Lock (`_pip_lock`) lässt
+  nur einen pip-Prozess gleichzeitig zu (409 sonst); bei laufendem Training
+  (`active.id is not None`) wird Update/Restart abgelehnt. pip läuft immer mit
+  `sys.executable -m pip`, also im Interpreter/venv des Servers.
+- **Neustart:** Updates wirken erst nach Neustart (Module sind geladen).
+  `/api/software/restart` schließt die DB (`close_db()`), setzt
+  `WOODROWER_NO_BROWSER=1` und ruft nach 0,5 s `os.execv` auf
+  `server.py` + originale Argumente (gleiche PID, Host/Port bleiben). Das
+  Frontend pollt danach `GET /api/software` und lädt die Seite neu. Der
+  BLE-Task wird nicht sauber beendet — der Neustart ist nur außerhalb von
+  Trainings erlaubt; die Verbindung baut sich beim nächsten Start neu auf.
+- **Protokoll:** `software.log` (neben `server.py`, per `*.log` ignoriert) mit
+  `CHECK`/`UPDATE`/`UPDATE-FEHLER`.
+- `requirements.txt` wird **nicht** automatisch angepasst (nur `>=`-Untergrenzen).
+
 ## 7 · Conventions
 
 - Code-Kommentare und Docstrings auf Englisch.
@@ -894,6 +935,9 @@ Hot Spots, wo Änderungen oft Folge­fehler haben:
   Rower-Task (er)startet (Lifespan **und** `/api/sim`, siehe §6.13);
   neue Aufrufer sollten diese Funktion nutzen statt selbst
   `asyncio.create_task(...)` zu rufen, sonst laufen zwei Tasks parallel.
+- `_update_packages()` / `/api/software/update` in `server.py` – die
+  Namensprüfung gegen installierte Distributionen ist die einzige Barriere
+  vor `pip install`; nicht durch freie Specifier/URLs ersetzen (§6.17).
 - `backdrop-filter` und Dauer-Animationen (`.ble-spinner`) auf den
   Vollbild-Overlays (siehe §6.16) – beides ist teuer, solange ein Overlay
   sichtbar ist, und die Auto-Pause kann beliebig lange offen bleiben. Kein

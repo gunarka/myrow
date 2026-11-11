@@ -592,3 +592,22 @@
     border: 1px solid var(--border); border-radius: 4px;
     background: var(--card); color: var(--text);
   }
+
+  /* ---------- Admin: Software & Bibliotheken ---------- */
+  .sw-env { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .sw-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+  .sw-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; }
+  .sw-table th, .sw-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .sw-table td.num, .sw-table th.num { font-variant-numeric: tabular-nums; }
+  .sw-table input[type=checkbox] { margin: 0; }
+  .sw-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-left: 6px; }
+  .sw-badge.major { background: var(--danger-bg);  color: var(--red); }
+  .sw-badge.minor { background: var(--warning-bg); color: var(--warning-text); }
+  .sw-badge.patch, .sw-badge.other { background: var(--success-bg); color: var(--success-text); }
+  .sw-ok  { color: var(--success-text); }
+  .sw-err { color: var(--red); }
+  .sw-banner { background: var(--warning-bg); color: var(--warning-text); padding: 10px 12px; border-radius: 8px; font-size: 13px; margin: 10px 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .sw-banner[hidden], .sw-result[hidden] { display: none; }
+  .sw-result { font-size: 13px; margin: 10px 0; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; line-height: 1.6; }
+  #sw-deps summary { font-size: 13px; cursor: pointer; margin-top: 10px; }
+  .sw-log { font-size: 12px; max-height: 200px; overflow: auto; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 6px 0 0; white-space: pre-wrap; }

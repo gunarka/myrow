@@ -2768,6 +2768,156 @@ async function renderBleConfig() {
   }
 }
 
+// ---------- software / library management (Admin) ----------
+const sw = { direct: [], outdated: null, sel: new Set(), busy: false };
+
+async function swApi(url, method = "GET", body) {
+  const r = await fetch(url, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = {};
+  try { data = await r.json(); } catch {}
+  if (!r.ok) throw new Error(data.detail || `Fehler (${r.status})`);
+  return data;
+}
+
+const swKey = (n) => n.toLowerCase().replace(/[-_.]+/g, "-");
+
+function swRender() {
+  const out = new Map((sw.outdated || []).map(o => [swKey(o.name), o]));
+  const bump = (o) => `<span class="sw-badge ${o.bump}">${o.bump}</span>`;
+  const head = (all) => `<tr><th style="width:28px">${all}</th><th>Paket</th><th class="num">Installiert</th><th class="num">Verfügbar</th></tr>`;
+  const chk = (name) => `<input type="checkbox" class="sw-chk" data-name="${escapeHtml(name)}" ${sw.sel.has(name) ? "checked" : ""} ${sw.busy ? "disabled" : ""} />`;
+
+  // Direct packages (requirements.txt): always listed.
+  const rows = sw.direct.map(d => {
+    const o = out.get(swKey(d.name));
+    const inst = d.version ? escapeHtml(d.version) : `<span class="sw-err">fehlt</span>`;
+    let avail = `<span style="color:var(--muted)">–</span>`;
+    if (sw.outdated) avail = o ? `${escapeHtml(o.latest)}${bump(o)}` : `<span class="sw-ok">✓ aktuell</span>`;
+    return `<tr><td>${o ? chk(o.name) : ""}</td><td>${escapeHtml(d.name)}</td><td class="num">${inst}</td><td class="num">${avail}</td></tr>`;
+  }).join("");
+  const anyDirectOut = sw.direct.some(d => out.has(swKey(d.name)));
+  $("#sw-direct").innerHTML = head(anyDirectOut ? `<input type="checkbox" class="sw-all" data-scope="direct" />` : "") + rows;
+
+  // Transitive dependencies that are outdated.
+  const deps = (sw.outdated || []).filter(o => !o.direct);
+  const det = $("#sw-deps");
+  det.hidden = !deps.length;
+  if (deps.length) {
+    $("#sw-deps-sum").textContent = `Abhängigkeiten mit Update (${deps.length})`;
+    $("#sw-deps-table").innerHTML = head(`<input type="checkbox" class="sw-all" data-scope="deps" />`) +
+      deps.map(o => `<tr><td>${chk(o.name)}</td><td>${escapeHtml(o.name)}</td><td class="num">${escapeHtml(o.version)}</td><td class="num">${escapeHtml(o.latest)}${bump(o)}</td></tr>`).join("");
+  }
+
+  $$(".sw-chk").forEach(c => c.onchange = () => {
+    c.checked ? sw.sel.add(c.dataset.name) : sw.sel.delete(c.dataset.name);
+    swUpdateButton();
+  });
+  $$(".sw-all").forEach(a => a.onchange = () => {
+    const names = (a.dataset.scope === "direct"
+      ? (sw.outdated || []).filter(o => o.direct) : deps).map(o => o.name);
+    names.forEach(n => a.checked ? sw.sel.add(n) : sw.sel.delete(n));
+    swRender();
+  });
+  swUpdateButton();
+}
+
+function swUpdateButton() {
+  const n = sw.sel.size;
+  const b = $("#btn-sw-update");
+  b.textContent = n ? `⬆ ${n} aktualisieren` : "⬆ Aktualisieren";
+  b.disabled = sw.busy || n === 0;
+  $("#btn-sw-check").disabled = sw.busy;
+}
+
+async function swLoadLog() {
+  try { $("#sw-log").textContent = (await swApi("/api/software/log")).log || "Noch keine Einträge."; }
+  catch { $("#sw-log").textContent = "Protokoll nicht lesbar."; }
+}
+
+async function renderSoftware() {
+  try {
+    const info = await swApi("/api/software");
+    sw.direct = info.direct;
+    $("#sw-env").innerHTML =
+      `Python ${escapeHtml(info.python)} · ${escapeHtml(info.pip || "pip nicht verfügbar")}` +
+      ` · ${info.venv ? "venv aktiv" : "<b>keine venv</b> (System-Python)"}<br>` +
+      `<span style="font-family:monospace">${escapeHtml(info.executable)}</span>`;
+  } catch (e) {
+    $("#sw-env").textContent = "Konnte Softwareinfo nicht laden: " + e.message;
+  }
+  swRender();
+  swLoadLog();
+}
+
+function swSetBusy(busy, msg = "") {
+  sw.busy = busy;
+  $("#sw-status").textContent = msg;
+  $$(".sw-chk, .sw-all").forEach(c => c.disabled = busy);
+  swUpdateButton();
+}
+
+$("#btn-sw-check").onclick = async () => {
+  swSetBusy(true, "Prüfe PyPI… (kann etwas dauern)");
+  $("#sw-result").hidden = true;
+  try {
+    const r = await swApi("/api/software/check", "POST");
+    sw.outdated = r.outdated;
+    sw.sel = new Set(r.outdated.filter(o => o.direct).map(o => o.name));
+    const d = r.outdated.filter(o => o.direct).length;
+    swSetBusy(false, r.outdated.length
+      ? `${d} direkte(s) Paket(e), ${r.outdated.length - d} Abhängigkeit(en) veraltet.`
+      : "✓ Alles aktuell.");
+  } catch (e) {
+    swSetBusy(false, "✗ " + e.message);
+  }
+  swRender();
+  swLoadLog();
+};
+
+$("#btn-sw-update").onclick = async () => {
+  const names = [...sw.sel];
+  const majors = (sw.outdated || []).filter(o => sw.sel.has(o.name) && o.bump === "major").map(o => o.name);
+  if (majors.length && !confirm(`Major-Update(s) können inkompatibel sein:\n${majors.join(", ")}\n\nTrotzdem fortfahren?`)) return;
+  swSetBusy(true, `Aktualisiere ${names.length} Paket(e)… bitte warten`);
+  const box = $("#sw-result");
+  box.hidden = true;
+  try {
+    const r = await swApi("/api/software/update", "POST", { packages: names });
+    box.innerHTML = r.results.map(x => x.ok
+      ? `<div class="sw-ok">✓ ${escapeHtml(x.name)}: ${escapeHtml(x.before || "?")} → ${escapeHtml(x.after || "?")}</div>`
+      : `<div class="sw-err">✗ ${escapeHtml(x.name)}: ${escapeHtml(x.error)}</div>`).join("");
+    box.hidden = false;
+    const okNames = new Set(r.results.filter(x => x.ok).map(x => swKey(x.name)));
+    sw.outdated = (sw.outdated || []).filter(o => !okNames.has(swKey(o.name)));
+    sw.sel = new Set([...sw.sel].filter(n => !okNames.has(swKey(n))));
+    if (r.restart_required) $("#sw-restart").hidden = false;
+    swSetBusy(false, "");
+    const info = await swApi("/api/software");
+    sw.direct = info.direct;
+  } catch (e) {
+    swSetBusy(false, "✗ " + e.message);
+  }
+  swRender();
+  swLoadLog();
+};
+
+$("#btn-sw-restart").onclick = async () => {
+  if (!confirm("Server jetzt neu starten? Die Seite lädt danach automatisch neu.")) return;
+  swSetBusy(true, "Server startet neu…");
+  try { await swApi("/api/software/restart", "POST"); }
+  catch (e) { swSetBusy(false, "✗ " + e.message); return; }
+  await new Promise(r => setTimeout(r, 1500));
+  for (let i = 0; i < 40; i++) {
+    try { await swApi("/api/software"); location.reload(); return; }
+    catch { await new Promise(r => setTimeout(r, 1000)); }
+  }
+  swSetBusy(false, "✗ Server nicht erreichbar – bitte manuell starten.");
+};
+
 // ---------- admin / user management ----------
 const USERS_KEY       = "wr_users";
 const ACTIVE_USER_KEY = "wr_active_user";
@@ -2791,6 +2941,7 @@ async function renderAdmin() {
   $("#admin-user-form").hidden = true;
   renderBleConfig();
   renderExportSessions();
+  renderSoftware();
 
   if (!users.length) {
     el.innerHTML = `<div class="empty-hint">Noch keine Benutzer. Klick auf <b>+ Neuer Benutzer</b>.</div>`;

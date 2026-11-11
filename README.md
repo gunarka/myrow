@@ -59,7 +59,14 @@ zuführen und im Verlauf auszuwerten.
   Mehrere Sessions werden als ZIP geliefert; TCX/FIT lassen sich direkt in
   Strava, Garmin Connect oder Runalyze importieren.
 - **Admin-Tab** – Bluetooth-Adresse per UI eintragen/scannen,
-  Nutzerprofile verwalten, Dark Mode umschalten, Sessions exportieren.
+  Nutzerprofile verwalten, Dark Mode umschalten, Sessions exportieren,
+  Bibliotheken auf Updates prüfen und aktualisieren.
+- **Software & Bibliotheken** – der Admin-Tab zeigt Python-/pip-Version und
+  die direkten Abhängigkeiten aus `requirements.txt` mit installierter
+  Version. *Auf Updates prüfen* fragt PyPI ab (Update-Größe als
+  `major`/`minor`/`patch` markiert); ausgewählte Pakete werden per Knopf
+  aktualisiert, danach startet *Server neu starten* die App mit den neuen
+  Versionen (ohne neuen Browser-Tab). Alle Aktionen landen in `software.log`.
 - **Simulationsmodus** falls kein Rudergerät verbunden ist – die UI
   funktioniert trotzdem, mit gefakten Strokes. Lässt sich sowohl per
   Umgebungsvariable beim Start als auch jederzeit über einen Schalter
@@ -107,7 +114,7 @@ Quellcode und Issues: <https://github.com/gunarka/myrow> (Branch `main`).
 | `README.md` / `CONTEXT.md` | Nutzer-Anleitung / Entwickler-Briefing           |
 
 Nicht im Repo (lokal erzeugt, per `.gitignore` ausgeschlossen):
-`config.json`, `woodrower.duckdb`, `.venv/`, Exportdateien.
+`config.json`, `woodrower.duckdb`, `software.log`, `.venv/`, Exportdateien.
 
 ## Erststart / Initial Setup
 
@@ -168,6 +175,7 @@ Dann im Browser öffnen: <http://localhost:8000>
 | `WOODROWER_BLE_SCAN_TIMEOUT`    | `15`        | Sekunden aktiver BLE-Scan pro Connect-Versuch.       |
 | `WOODROWER_BLE_CONNECT_TIMEOUT` | `45`        | Sekunden Timeout für den eigentlichen GATT-Connect.  |
 | `WOODROWER_BLE_RESET_ADAPTER`   | `0`         | `1` = Bluetooth-Adapter nach mehreren Fehlversuchen in Folge power-cyclen (betrifft alle BT-Geräte am Rechner). |
+| `WOODROWER_NO_BROWSER`          | `0`         | `1` = beim Start keinen Browser-Tab öffnen (wird vom Admin-Neustart automatisch gesetzt). |
 
 ### Sicherheits­hinweis
 
@@ -207,7 +215,9 @@ WOODROWER_HOST=0.0.0.0 python server.py
 5. Im Tab **Admin** lassen sich Nutzerprofile anlegen, die Bluetooth-
    Adresse des Rudergeräts eintragen (oder per Scan suchen), der
    Simulationsmodus umschalten, die Auto-Pause-Zeit einstellen, der
-   Dark Mode aktivieren und Sessions exportieren (CSV / JSON / TCX / FIT).
+   Dark Mode aktivieren, Sessions exportieren (CSV / JSON / TCX / FIT) und
+   unter *Software & Bibliotheken* Updates prüfen und einspielen (nicht
+   während eines Trainings).
 6. **Beenden** (oben rechts in der Navigationsleiste) fährt den Server
    sauber herunter und schließt den Tab.
 
