@@ -441,7 +441,8 @@ geschrieben, damit der Verlauf dem richtigen Nutzer zugeordnet bleibt.
 **Verlauf je Nutzer:** Der Tab *Verlauf* folgt dem **aktiven Nutzer**
 (`getProfile()`, Admin-Tab *Aktiv setzen* oder Nutzer-Auswahl im Dashboard;
 dort wird beim Start bzw. Wechsel `setActiveUserId()` gesetzt). Der Name steht
-im Kopf der Ansicht (`#history-user-label`). Alle KPIs, Bestwerte, Heatmaps,
+im Kopf der Ansicht (`.active-user-line`, ebenso auf der Trainingsliste) mit
+Link *(ändern)* zum Admin-Tab (`renderActiveUserLines()`). Alle KPIs, Bestwerte, Heatmaps,
 Trends, Leistungsprofil und die Trainingsliste gelten nur für diesen Nutzer;
 Trainings anderer/nicht zugeordneter Nutzer werden ausgeblendet (Hinweis
 `#history-user-note`). Ohne Profil gilt `user_id IS NULL`. Filter serverseitig

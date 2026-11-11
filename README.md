@@ -47,7 +47,7 @@ zuführen und im Verlauf auszuwerten.
 - **Verlauf & Statistik** – jede Session landet automatisch in einer
   DuckDB neben `server.py`; mit GitHub-Style-Heatmap, persönlichen
   Bestwerten und Durchschnitten. Der Verlauf folgt dem **aktiven Nutzer**
-  (Name oben angezeigt): Kennzahlen, Heatmaps, Trends und Trainingsliste
+  (Name oben angezeigt, mit Link *(ändern)* zum Admin-Tab; ebenso auf der Trainingsliste): Kennzahlen, Heatmaps, Trends und Trainingsliste
   beziehen sich nur auf ihn. Den aktiven Nutzer wählst du im Admin-Tab
   oder im Dashboard.
 - **Auswertung mehrerer Trainings** – im Tab **Verlauf** zeigen

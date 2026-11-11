@@ -219,7 +219,7 @@ function showView(name) {
     b.classList.toggle("active", b.dataset.view === navName)
   );
   document.body.classList.toggle("view-dashboard", name === "dashboard");
-  if (name === "list")      renderList();
+  if (name === "list")      { renderActiveUserLines(); renderList(); }
   if (name === "dashboard") drawChart();
   if (name === "history")   renderHistory();
   if (name === "admin")     renderAdmin();
@@ -1267,6 +1267,21 @@ function drawChart(curT = 0) {
 }
 
 // ---------- history view ----------
+// ---------- aktiver Nutzer: Anzeige + Link zum Wechsel ----------
+function renderActiveUserLines() {
+  const prof = getProfile();
+  const html = `👤 <b>${escapeHtml(prof ? prof.name : "Kein Nutzerprofil")}</b> ` +
+    `<a href="#" class="au-change">(ändern)</a>`;
+  $$(".active-user-line").forEach(el => {
+    el.innerHTML = html;
+    el.querySelector(".au-change").onclick = e => {
+      e.preventDefault();
+      showView("admin");
+      document.getElementById("admin-users")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+  });
+}
+
 // ---------- history: folgt dem aktiven Nutzer ----------
 let _histToken = 0;
 
@@ -1282,7 +1297,7 @@ async function renderHistory() {
   }
   const prof = getProfile();
   const sel  = prof ? prof.id : "none";
-  $("#history-user-label").textContent = prof ? prof.name : "Ohne Nutzerprofil";
+  renderActiveUserLines();
   const orphan = all.filter(s => (s.user_id || "none") !== sel).length;
   $("#history-user-note").textContent = orphan
     ? `${orphan} Trainings anderer bzw. nicht zugeordneter Nutzer sind ausgeblendet.` : "";
