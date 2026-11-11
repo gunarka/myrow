@@ -54,6 +54,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -250,14 +251,45 @@ def db() -> duckdb.DuckDBPyConnection:
     return _db
 
 
+def _migrate_workouts_to_ids() -> None:
+    """Old schema keyed workouts by name (same name = overwritten).
+    Rebuild the table keyed by a generated ID; names stay as plain labels.
+    Caller holds _db_lock."""
+    cols = [r[1] for r in _db.execute("PRAGMA table_info('workouts')").fetchall()]
+    if not cols or "id" in cols:
+        return
+    rows = _db.execute(
+        "SELECT name, definition, created_at, updated_at FROM workouts"
+    ).fetchall()
+    _db.execute("DROP TABLE workouts")
+    _db.execute("""
+        CREATE TABLE workouts (
+            id          VARCHAR PRIMARY KEY,
+            name        VARCHAR NOT NULL,
+            definition  VARCHAR NOT NULL,
+            created_at  TIMESTAMP DEFAULT current_timestamp,
+            updated_at  TIMESTAMP DEFAULT current_timestamp
+        );
+    """)
+    for name, defn, created, updated in rows:
+        _db.execute(
+            "INSERT INTO workouts (id, name, definition, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [uuid.uuid4().hex, name, defn, created, updated],
+        )
+    log.info("migrated %d workouts to ID-based storage", len(rows))
+
+
 def init_db() -> None:
     global _db
     _db = duckdb.connect(str(DB_FILE))
 
     with _db_lock:
+        _migrate_workouts_to_ids()
         _db.execute("""
             CREATE TABLE IF NOT EXISTS workouts (
-                name        VARCHAR PRIMARY KEY,
+                id          VARCHAR PRIMARY KEY,
+                name        VARCHAR NOT NULL,
                 definition  VARCHAR NOT NULL,
                 created_at  TIMESTAMP DEFAULT current_timestamp,
                 updated_at  TIMESTAMP DEFAULT current_timestamp
@@ -330,6 +362,7 @@ def init_db() -> None:
             ("exercise_kcal", "INTEGER"),
             ("total_kcal",    "INTEGER"),
             ("user_id",       "VARCHAR"),
+            ("workout_id",    "VARCHAR"),
         ]:
             _db.execute(
                 f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} {coltype}"
@@ -346,9 +379,10 @@ def init_db() -> None:
                     ).fetchone()
                     if not existing:
                         _db.execute(
-                            "INSERT INTO workouts (name, definition) "
-                            "VALUES (?, ?)",
-                            [name, json.dumps(defn, ensure_ascii=False)],
+                            "INSERT INTO workouts (id, name, definition) "
+                            "VALUES (?, ?, ?)",
+                            [uuid.uuid4().hex, name,
+                             json.dumps(defn, ensure_ascii=False)],
                         )
                         migrated += 1
             if migrated:
@@ -387,36 +421,52 @@ def save_config(updates: dict[str, Any]) -> None:
 
 # ----- workout CRUD -----
 
-def db_list_workouts() -> dict[str, Any]:
+def _workout_row(row) -> dict[str, Any]:
+    wid, name, defn = row
+    return {"id": wid, "name": name, "definition": json.loads(defn)}
+
+
+def db_list_workouts() -> list[dict[str, Any]]:
     with _db_lock:
         rows = db().execute(
-            "SELECT name, definition FROM workouts ORDER BY updated_at DESC"
+            "SELECT id, name, definition FROM workouts ORDER BY updated_at DESC"
         ).fetchall()
-    return {name: json.loads(defn) for name, defn in rows}
+    return [_workout_row(r) for r in rows]
 
 
-def db_get_workout(name: str) -> dict[str, Any] | None:
+def db_get_workout(workout_id: str) -> dict[str, Any] | None:
     with _db_lock:
         row = db().execute(
-            "SELECT definition FROM workouts WHERE name = ?", [name]
+            "SELECT id, name, definition FROM workouts WHERE id = ?",
+            [workout_id],
         ).fetchone()
-    return json.loads(row[0]) if row else None
+    return _workout_row(row) if row else None
 
 
-def db_save_workout(name: str, definition: dict[str, Any]) -> None:
-    defn_json = json.dumps(definition, ensure_ascii=False)
+def db_create_workout(name: str, definition: dict[str, Any]) -> str:
+    wid = uuid.uuid4().hex
     with _db_lock:
         db().execute(
-            "INSERT INTO workouts (name, definition) VALUES (?, ?) "
-            "ON CONFLICT (name) DO UPDATE SET "
-            "definition = excluded.definition, updated_at = now()",
-            [name, defn_json],
+            "INSERT INTO workouts (id, name, definition) VALUES (?, ?, ?)",
+            [wid, name, json.dumps(definition, ensure_ascii=False)],
         )
+    return wid
 
 
-def db_delete_workout(name: str) -> None:
+def db_update_workout(workout_id: str, name: str,
+                      definition: dict[str, Any]) -> bool:
     with _db_lock:
-        db().execute("DELETE FROM workouts WHERE name = ?", [name])
+        n = db().execute(
+            "UPDATE workouts SET name = ?, definition = ?, updated_at = now() "
+            "WHERE id = ? RETURNING id",
+            [name, json.dumps(definition, ensure_ascii=False), workout_id],
+        ).fetchall()
+    return bool(n)
+
+
+def db_delete_workout(workout_id: str) -> None:
+    with _db_lock:
+        db().execute("DELETE FROM workouts WHERE id = ?", [workout_id])
 
 
 # ----- user & settings CRUD -----
@@ -485,14 +535,15 @@ def db_set_settings(updates: dict[str, Any]) -> None:
 # ----- session CRUD -----
 
 def db_create_session(workout_name: str | None,
-                      workout_snapshot: dict[str, Any] | None) -> int:
+                      workout_snapshot: dict[str, Any] | None,
+                      workout_id: str | None = None) -> int:
     snap_json = json.dumps(workout_snapshot, ensure_ascii=False) \
         if workout_snapshot is not None else None
     with _db_lock:
         row = db().execute(
-            "INSERT INTO sessions (workout_name, workout_snapshot) "
-            "VALUES (?, ?) RETURNING id",
-            [workout_name, snap_json],
+            "INSERT INTO sessions (workout_name, workout_snapshot, workout_id) "
+            "VALUES (?, ?, ?) RETURNING id",
+            [workout_name, snap_json, workout_id],
         ).fetchone()
     return int(row[0])
 
@@ -1707,29 +1758,17 @@ async def index():
 
 # ----- workouts -----
 
-@app.get("/api/workouts")
-async def api_list_workouts():
-    return db_list_workouts()
-
-
-@app.get("/api/workouts/{name}")
-async def api_get_workout(name: str):
-    w = db_get_workout(name)
-    if w is None:
-        raise HTTPException(404, "workout not found")
-    return w
-
-
-@app.put("/api/workouts/{name}")
-async def api_save_workout(name: str, workout: dict[str, Any]):
-    # Light shape validation. We keep it permissive (no Pydantic model) so
-    # the editor in index.html can evolve without forcing schema changes
-    # here, but we still reject obviously-malformed input that would only
-    # blow up later in expandWorkout().
-    if not name or len(name) > MAX_WORKOUT_NAME_LEN:
+def _parse_workout_body(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Body: {"name": str, "definition": {...}}. Light shape validation; we
+    stay permissive (no Pydantic) so the editor can evolve freely, but reject
+    input that would only blow up later in expandWorkout()."""
+    name = body.get("name")
+    workout = body.get("definition")
+    if not isinstance(name, str) or not name.strip() \
+            or len(name.strip()) > MAX_WORKOUT_NAME_LEN:
         raise HTTPException(400, f"name must be 1..{MAX_WORKOUT_NAME_LEN} chars")
     if not isinstance(workout, dict):
-        raise HTTPException(400, "workout must be a JSON object")
+        raise HTTPException(400, "definition must be a JSON object")
     serialized = json.dumps(workout, ensure_ascii=False)
     if len(serialized) > MAX_WORKOUT_JSON_LEN:
         raise HTTPException(413, "workout JSON too large")
@@ -1740,13 +1779,39 @@ async def api_save_workout(name: str, workout: dict[str, Any]):
     if steps is not None and (not isinstance(steps, list) or
                               len(steps) > MAX_WORKOUT_STEPS):
         raise HTTPException(400, f"too many steps (max {MAX_WORKOUT_STEPS})")
-    db_save_workout(name, workout)
+    return name.strip(), workout
+
+
+@app.get("/api/workouts")
+async def api_list_workouts():
+    return db_list_workouts()
+
+
+@app.get("/api/workouts/{workout_id}")
+async def api_get_workout(workout_id: str):
+    w = db_get_workout(workout_id)
+    if w is None:
+        raise HTTPException(404, "workout not found")
+    return w
+
+
+@app.post("/api/workouts")
+async def api_create_workout(body: dict[str, Any]):
+    name, workout = _parse_workout_body(body)
+    return {"id": db_create_workout(name, workout)}
+
+
+@app.put("/api/workouts/{workout_id}")
+async def api_update_workout(workout_id: str, body: dict[str, Any]):
+    name, workout = _parse_workout_body(body)
+    if not db_update_workout(workout_id, name, workout):
+        raise HTTPException(404, "workout not found")
     return {"ok": True}
 
 
-@app.delete("/api/workouts/{name}")
-async def api_delete_workout(name: str):
-    db_delete_workout(name)
+@app.delete("/api/workouts/{workout_id}")
+async def api_delete_workout(workout_id: str):
+    db_delete_workout(workout_id)
     return {"ok": True}
 
 
@@ -1758,7 +1823,8 @@ async def api_session_start(body: dict[str, Any]):
         raise HTTPException(409, f"a session is already active (id={active.id})")
     workout_name     = body.get("workout_name")
     workout_snapshot = body.get("workout_snapshot")
-    sid = db_create_session(workout_name, workout_snapshot)
+    workout_id       = body.get("workout_id")
+    sid = db_create_session(workout_name, workout_snapshot, workout_id)
     active.reset()
     active.id = sid
     active.started_at = asyncio.get_running_loop().time()

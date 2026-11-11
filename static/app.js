@@ -303,23 +303,24 @@ $$("header nav button").forEach(b =>
 // ---------- API ----------
 async function apiListWorkouts() {
   const r = await fetch("/api/workouts");
-  return await r.json();
+  return await r.json();   // [{ id, name, definition }]
 }
-async function apiSaveWorkout(name, w) {
-  await fetch("/api/workouts/" + encodeURIComponent(name), {
-    method: "PUT",
+async function apiSaveWorkout(id, name, definition) {
+  const r = await fetch(id ? "/api/workouts/" + encodeURIComponent(id) : "/api/workouts", {
+    method: id ? "PUT" : "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(w),
+    body: JSON.stringify({ name, definition }),
   });
+  if (!r.ok) throw new Error(await r.text());
 }
-async function apiDeleteWorkout(name) {
-  await fetch("/api/workouts/" + encodeURIComponent(name), { method: "DELETE" });
+async function apiDeleteWorkout(id) {
+  await fetch("/api/workouts/" + encodeURIComponent(id), { method: "DELETE" });
 }
-async function apiStartSession(workoutName, snapshot) {
+async function apiStartSession(workoutName, snapshot, workoutId) {
   const r = await fetch("/api/sessions/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workout_name: workoutName, workout_snapshot: snapshot }),
+    body: JSON.stringify({ workout_name: workoutName, workout_snapshot: snapshot, workout_id: workoutId || null }),
   });
   if (!r.ok) { console.warn("session start failed", await r.text()); return null; }
   return (await r.json()).id;
@@ -375,15 +376,18 @@ async function renderList() {
   const workouts = await apiListWorkouts();
   const list = $("#workout-list");
   list.innerHTML = "";
-  const names = Object.keys(workouts);
-  if (!names.length) {
+  if (!workouts.length) {
     list.innerHTML = `<div class="card" style="text-align:center;color:var(--muted)">
       Noch keine Trainings. Klick auf <b>+ Neues Training</b>
       oder starte ein <b>Freies Training</b>.</div>`;
     return;
   }
-  for (const name of names) {
-    const w = workouts[name];
+  const nameCount = {};
+  workouts.forEach(x => { nameCount[x.name] = (nameCount[x.name] || 0) + 1; });
+  for (const item of workouts) {
+    const { id, name } = item;
+    const w = item.definition;
+    const idHint = nameCount[name] > 1 ? ` · ID ${id.slice(0, 6)}` : "";
     const total = workoutTotalSeconds(w);
     const card = document.createElement("div");
     card.className = "workout-card";
@@ -392,18 +396,18 @@ async function renderList() {
       <div>
         <h3>${escapeHtml(name)}</h3>
         <div class="meta">${fmtTime(total)} · ${Number(w.repeat_count) || 0}× ${
-          (w.steps || []).length} Schritte</div>
+          (w.steps || []).length} Schritte${idHint}</div>
       </div>
       <div class="spacer"></div>
       <button data-act="start">▶ Start</button>
       <button class="ghost" data-act="edit">Bearbeiten</button>
       <button class="danger" data-act="delete">Löschen</button>
     `;
-    card.querySelector('[data-act=start]').onclick  = () => startWorkout(name, w);
-    card.querySelector('[data-act=edit]').onclick   = () => openEditor(name, w);
+    card.querySelector('[data-act=start]').onclick  = () => startWorkout(id, name, w);
+    card.querySelector('[data-act=edit]').onclick   = () => openEditor(id, name, w);
     card.querySelector('[data-act=delete]').onclick = async () => {
       if (!confirm(`"${name}" löschen?`)) return;
-      await apiDeleteWorkout(name);
+      await apiDeleteWorkout(id);
       renderList();
     };
     list.appendChild(card);
@@ -441,7 +445,7 @@ function expandWorkout(w) {
 }
 
 // ---------- editor ----------
-let editingName = null;
+let editingId = null;
 
 function wireSlider(rangeEl, valEl) {
   const update = () => { valEl.textContent = rangeEl.value; recalcEditorDuration(); };
@@ -661,9 +665,9 @@ function _attachEditorPreviewHover() {
   });
 }
 
-function openEditor(name, w) {
-  editingName = name;
-  $("#editor-title").textContent = name ? "Training bearbeiten" : "Neues Training";
+function openEditor(id, name, w) {
+  editingId = id || null;
+  $("#editor-title").textContent = id ? "Training bearbeiten" : "Neues Training";
   $("#ed-name").value = name || "";
   const W = w || {
     start: { duration_s: 180, resistance_pct: 3 },
@@ -734,7 +738,7 @@ $("#ed-end-dur").addEventListener("input",   recalcEditorDuration);
 $("#ed-reps-count").addEventListener("input",    recalcEditorDuration);
 $("#ed-last-rep-skip").addEventListener("input", recalcEditorDuration);
 
-$("#btn-new").onclick      = () => openEditor(null, null);
+$("#btn-new").onclick      = () => openEditor(null, null, null);
 $("#btn-add-step").onclick = () => addStepRow();
 $("#btn-cancel").onclick   = () => showView("list");
 
@@ -761,8 +765,12 @@ $("#btn-save").onclick = async () => {
       comment:        $("#ed-end-comment").value.trim(),
     },
   };
-  if (editingName && editingName !== name) await apiDeleteWorkout(editingName);
-  await apiSaveWorkout(name, w);
+  try {
+    await apiSaveWorkout(editingId, name, w);
+  } catch (e) {
+    alert("Speichern fehlgeschlagen: " + e.message);
+    return;
+  }
   showView("list");
 };
 
@@ -794,6 +802,7 @@ function playFinishBeep() { playBeep(1760, 1); }
 
 // ---------- dashboard ----------
 const dash = {
+  workoutId:   null,
   workoutName: null,
   workoutDef:  null,
   segments:    [],
@@ -849,8 +858,9 @@ function populateDashUserSelect() {
   sel.onchange = () => { if (sel.value) setActiveUserId(sel.value); };
 }
 
-function startWorkout(name, w) {
+function startWorkout(id, name, w) {
   if (dash.sessionId != null) apiStopSession(dash.sessionId, false);
+  dash.workoutId   = id;
   dash.workoutName = name;
   dash.workoutDef  = w;
   dash.segments = expandWorkout(w);
@@ -868,6 +878,7 @@ function startWorkout(name, w) {
 
 function startFreeTraining() {
   if (dash.sessionId != null) apiStopSession(dash.sessionId, false);
+  dash.workoutId   = null;
   dash.workoutName = "Freies Training";
   dash.workoutDef  = null;
   dash.segments = [];
@@ -914,7 +925,7 @@ async function autoStartSession() {
   if (dash.userId) setActiveUserId(dash.userId);
   $("#d-user-select").disabled = true;
   const snapshot = dash.freeMode ? null : dash.workoutDef;
-  const sid = await apiStartSession(dash.workoutName, snapshot);
+  const sid = await apiStartSession(dash.workoutName, snapshot, dash.workoutId);
   if (sid == null) { dash.autoStartPending = false; return; }
   dash.sessionId = sid;
   dash.startedAt = performance.now();
