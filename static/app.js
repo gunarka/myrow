@@ -273,8 +273,9 @@ async function apiGetResistance() {
   const r = await fetch("/api/resistance");
   return await r.json();
 }
-async function apiStats(days = 365) {
-  const r = await fetch(`/api/stats?days=${days}`);
+function _uq(userId) { return userId ? `&user_id=${encodeURIComponent(userId)}` : ""; }
+async function apiStats(days = 365, userId = null) {
+  const r = await fetch(`/api/stats?days=${days}${_uq(userId)}`);
   return await r.json();
 }
 async function apiListSessions(limit = 50) {
@@ -774,6 +775,7 @@ function populateDashUserSelect() {
     ? users.map(u => `<option value="${u.id}"${u.id === activeId ? " selected" : ""}>${escapeHtml(u.name || "–")}</option>`).join("")
     : `<option value="">– kein Benutzer –</option>`;
   sel.disabled = false;
+  sel.onchange = () => { if (sel.value) setActiveUserId(sel.value); };
 }
 
 function startWorkout(name, w) {
@@ -838,6 +840,7 @@ async function autoStartSession() {
   if (dash.startedAt || dash.autoStartPending) return;
   dash.autoStartPending = true;
   dash.userId = $("#d-user-select").value || null;
+  if (dash.userId) setActiveUserId(dash.userId);
   $("#d-user-select").disabled = true;
   const snapshot = dash.freeMode ? null : dash.workoutDef;
   const sid = await apiStartSession(dash.workoutName, snapshot);
@@ -1264,17 +1267,34 @@ function drawChart(curT = 0) {
 }
 
 // ---------- history view ----------
+// ---------- history: folgt dem aktiven Nutzer ----------
+let _histToken = 0;
+
 async function renderHistory() {
-  let stats, sessions;
+  const token = ++_histToken;
+  let all;
   try {
-    [stats, sessions] = await Promise.all([apiStats(0), apiListSessions(10000)]);
+    all = await apiListSessions(10000);
   } catch (e) {
     $("#sessions-list").innerHTML =
       `<div class="empty-hint">Konnte Verlauf nicht laden.</div>`;
     return;
   }
-  // Trends loaded in parallel, non-blocking
-  apiTrends().then(renderTrends).catch(() => {
+  const prof = getProfile();
+  const sel  = prof ? prof.id : "none";
+  $("#history-user-label").textContent = prof ? prof.name : "Ohne Nutzerprofil";
+  const orphan = all.filter(s => (s.user_id || "none") !== sel).length;
+  $("#history-user-note").textContent = orphan
+    ? `${orphan} Trainings anderer bzw. nicht zugeordneter Nutzer sind ausgeblendet.` : "";
+
+  const sessions = all.filter(s => (s.user_id || "none") === sel);
+  let stats;
+  try {
+    stats = await apiStats(0, sel);
+  } catch (e) { return; }
+  if (token !== _histToken) return;            // schnelleren Wechsel nicht überschreiben
+  // Trends für diesen Nutzer (nicht blockierend)
+  apiTrends(sel).then(d => { if (token === _histToken) renderTrends(d); }).catch(() => {
     document.getElementById("trends-card").hidden = true;
     document.getElementById("trends-profile-card").hidden = true;
   });
@@ -2041,8 +2061,8 @@ function renderMonthHeatmap(daily) {
 }
 
 // ---------- multi-session trends ----------
-async function apiTrends() {
-  const r = await fetch("/api/stats/trends");
+async function apiTrends(userId = null) {
+  const r = await fetch(`/api/stats/trends?${_uq(userId).slice(1)}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return await r.json();
 }
@@ -2512,6 +2532,8 @@ window.addEventListener("resize", () => {
 async function apiImportSession(file) {
   const fd = new FormData();
   fd.append("file", file);
+  const prof = getProfile();
+  if (prof) fd.append("user_id", prof.id);
   const r = await fetch("/api/sessions/import", { method: "POST", body: fd });
   if (!r.ok) {
     let msg = `Upload fehlgeschlagen (${r.status})`;

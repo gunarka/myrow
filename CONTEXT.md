@@ -1,7 +1,7 @@
 # CONTEXT.md — Woodrower Trainer
 
 > Briefing für Claude Code (oder jeden anderen, der hier weiterbaut).
-> Stand: November 2026. Zuletzt aktualisiert: 2026-11-10.
+> Stand: November 2026. Zuletzt aktualisiert: 2026-11-11.
 > Repo: <https://github.com/gunarka/myrow> (Branch `main`, siehe §12).
 
 ## 1 · Worum geht's
@@ -317,8 +317,8 @@ Leistungssprung nach der Null-Phase > 2,5× des Werts davor.
 | POST    | `/api/sessions/{id}/pause`    | pausieren                         |
 | POST    | `/api/sessions/{id}/resume`   | fortsetzen                        |
 | POST    | `/api/sessions/{id}/stop`     | finalisieren (`completed: bool`)  |
-| POST    | `/api/sessions/import`        | Kinomap-Datei/ZIP hochladen       |
-| GET     | `/api/sessions?limit=N`       | Liste der abgeschlossenen Sessions |
+| POST    | `/api/sessions/import`        | Kinomap-Datei/ZIP hochladen (optional Form-Feld `user_id`) |
+| GET     | `/api/sessions?limit=N&user_id=U` | Liste der abgeschlossenen Sessions (optional je Nutzer) |
 | GET     | `/api/sessions/{id}`          | Detail inkl. Samples              |
 | DELETE  | `/api/sessions/{id}`          | löschen                           |
 | PATCH   | `/api/sessions/{id}/energy`   | Energiedaten speichern (`user_id`, `bmr_kcal`, `exercise_kcal`, `total_kcal`) |
@@ -329,8 +329,8 @@ Leistungssprung nach der Null-Phase > 2,5× des Werts davor.
 |---------|----------------------------|-----------------------------------|
 | GET     | `/api/resistance`          | aktueller Level + `connected`/`simulated`-Flags |
 | POST    | `/api/resistance`          | Level setzen (Body: `{level}`, 1–15) |
-| GET     | `/api/stats?days=N`        | Heatmap, Totals, Bests            |
-| GET     | `/api/stats/trends`        | Zeitreihen + P25/⌀/P75-Bänder + Power-Profil |
+| GET     | `/api/stats?days=N&user_id=U` | Heatmap, Totals, Bests (je Nutzer) |
+| GET     | `/api/stats/trends?user_id=U` | Zeitreihen + P25/⌀/P75-Bänder + Power-Profil |
 | POST    | `/api/shutdown`            | Server sauber beenden (SIGTERM)   |
 | WS      | `/ws`                      | Live-Datenstrom (siehe 4.3)       |
 
@@ -437,6 +437,16 @@ Geschlecht, Wirkungsgrad). Diese werden im Browser-`localStorage` (`wr_users`,
 `wr_active_user`) gehalten — **nicht** auf dem Server. Beim Session-Stop wird
 `user_id` + Kaloriendaten per `PATCH /api/sessions/{id}/energy` in die DB
 geschrieben, damit der Verlauf dem richtigen Nutzer zugeordnet bleibt.
+
+**Verlauf je Nutzer:** Der Tab *Verlauf* folgt dem **aktiven Nutzer**
+(`getProfile()`, Admin-Tab *Aktiv setzen* oder Nutzer-Auswahl im Dashboard;
+dort wird beim Start bzw. Wechsel `setActiveUserId()` gesetzt). Der Name steht
+im Kopf der Ansicht (`#history-user-label`). Alle KPIs, Bestwerte, Heatmaps,
+Trends, Leistungsprofil und die Trainingsliste gelten nur für diesen Nutzer;
+Trainings anderer/nicht zugeordneter Nutzer werden ausgeblendet (Hinweis
+`#history-user-note`). Ohne Profil gilt `user_id IS NULL`. Filter serverseitig
+über `user_id` (`_user_clause()` in `server.py`; `none` = ohne Zuordnung).
+Kinomap-Importe werden dem aktiven Nutzer zugeordnet.
 
 ### 6.10 · TCX/FIT-Export
 Sessions werden serverseitig aus den DB-Daten (`sessions` + `samples`) gebaut,

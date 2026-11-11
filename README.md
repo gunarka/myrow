@@ -46,14 +46,18 @@ zuführen und im Verlauf auszuwerten.
   Session dem gewählten Nutzer zugeordnet.
 - **Verlauf & Statistik** – jede Session landet automatisch in einer
   DuckDB neben `server.py`; mit GitHub-Style-Heatmap, persönlichen
-  Bestwerten und Durchschnitten.
+  Bestwerten und Durchschnitten. Der Verlauf folgt dem **aktiven Nutzer**
+  (Name oben angezeigt): Kennzahlen, Heatmaps, Trends und Trainingsliste
+  beziehen sich nur auf ihn. Den aktiven Nutzer wählst du im Admin-Tab
+  oder im Dashboard.
 - **Auswertung mehrerer Trainings** – im Tab **Verlauf** zeigen
   Trendkurven über die letzten 5 / 10 / 20 (oder alle) Einheiten
   Leistung, Pace, Schlagzahl, Distanz, Dauer und Kraft, jeweils mit
   P25–P75-Band und Mittelwert. Darunter das **Leistungsprofil**
   (P25 / ⌀ / P75 über den Trainingsverlauf).
 - **Kinomap-Import** – fertige Trainings aus der Kinomap-App
-  (`.zip` / `.tcx` / `.pwx` / `.csv`) lassen sich in den Verlauf laden.
+  (`.zip` / `.tcx` / `.pwx` / `.csv`) lassen sich in den Verlauf laden
+  und werden dem aktiven Nutzer zugeordnet.
 - **Export** – Sessions im Admin-Tab auswählen und als **CSV** (Excel/Sheets),
   **JSON** (Vollexport mit Rohdaten), **TCX** oder **FIT** herunterladen.
   Mehrere Sessions werden als ZIP geliefert; TCX/FIT lassen sich direkt in

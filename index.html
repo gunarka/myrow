@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Woodrower Trainer</title>
-<link rel="stylesheet" href="/static/style.css?v=20261110a" />
+<link rel="stylesheet" href="/static/style.css?v=20261111a" />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚣</text></svg>" />
 </head>
 <body>
@@ -196,6 +196,8 @@
       <span id="import-status" class="import-status"></span>
     </div>
 
+    <div class="history-user">👤 <b id="history-user-label"></b> <span id="history-user-note" class="hist-user-label"></span></div>
+
     <div class="stat-tiles">
       <div class="tile"><div class="v" id="t-sessions">0</div><div class="u">Trainings</div></div>
       <div class="tile"><div class="v" id="t-distance">0</div><div class="u">Gesamtdistanz</div></div>
@@ -236,7 +238,7 @@
         </div>
       </div>
       <div class="card">
-        <h3>Durchschnitte (alle Trainings)</h3>
+        <h3>Durchschnitte <span class="hist-user-label">(alle Trainings)</span></h3>
         <div class="bests">
           <div class="row"><div class="lbl">⌀ Leistung</div><div class="val" id="a-power">–</div></div>
           <div class="row"><div class="lbl">⌀ Pace</div><div class="val" id="a-pace">–</div></div>
@@ -518,6 +520,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20261110a"></script>
+<script src="/static/app.js?v=20261111a"></script>
 </body>
 </html>

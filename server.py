@@ -63,7 +63,7 @@ from typing import Any
 
 import duckdb
 from fastapi import (
-    FastAPI, File, HTTPException, UploadFile,
+    FastAPI, File, Form, HTTPException, UploadFile,
     WebSocket, WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -495,17 +495,29 @@ def _row_to_dict(cols: list[str], row: tuple) -> dict[str, Any]:
     return {k: v.isoformat() if isinstance(v, datetime) else v for k, v in zip(cols, row)}
 
 
-def db_list_sessions(limit: int = 100) -> list[dict[str, Any]]:
+def _user_clause(user_id: str | None) -> tuple[str, list[Any]]:
+    """SQL-Filter je Nutzer. None = alle, "none" = ohne Zuordnung."""
+    if not user_id:
+        return "", []
+    if user_id == "none":
+        return " AND user_id IS NULL", []
+    return " AND user_id = ?", [user_id]
+
+
+def db_list_sessions(limit: int = 100,
+                     user_id: str | None = None) -> list[dict[str, Any]]:
     cols = ["id", "workout_name", "started_at", "ended_at", "duration_s",
             "total_distance", "avg_power", "max_power", "avg_spm",
             "avg_pace", "avg_hr", "total_energy", "completed",
             "max_spm", "max_hr", "best_pace",
             "bmr_kcal", "exercise_kcal", "total_kcal", "user_id"]
+    u_sql, u_par = _user_clause(user_id)
     with _db_lock:
         rows = db().execute(
             f"SELECT {','.join(cols)} FROM sessions "
-            f"WHERE ended_at IS NOT NULL "
-            f"ORDER BY started_at DESC LIMIT {int(limit)}"
+            f"WHERE ended_at IS NOT NULL{u_sql} "
+            f"ORDER BY started_at DESC LIMIT {int(limit)}",
+            u_par,
         ).fetchall()
     return [_row_to_dict(cols, r) for r in rows]
 
@@ -691,14 +703,16 @@ def db_update_session_energy(session_id: int, user_id: str | None,
         """, [user_id, bmr_kcal, exercise_kcal, total_kcal, session_id])
 
 
-def db_trends() -> dict[str, Any]:
+def db_trends(user_id: str | None = None) -> dict[str, Any]:
     """Per-session series + p10/mean/p90 percentile bands for multi-training analytics."""
     s_cols = ["id", "started_at", "avg_power", "avg_pace", "avg_spm",
               "total_distance", "duration_s", "total_energy", "max_power"]
+    u_sql, u_par = _user_clause(user_id)
     with _db_lock:
         s_rows = db().execute(
             f"SELECT {','.join(s_cols)} FROM sessions "
-            f"WHERE ended_at IS NOT NULL ORDER BY started_at ASC"
+            f"WHERE ended_at IS NOT NULL{u_sql} ORDER BY started_at ASC",
+            u_par,
         ).fetchall()
         if not s_rows:
             return {"series": [], "percentiles": {}, "power_profile": []}
@@ -720,8 +734,8 @@ def db_trends() -> dict[str, Any]:
               PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY duration_s)     p25_duration,
               AVG(duration_s)                                               mean_duration,
               PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY duration_s)     p75_duration
-            FROM sessions WHERE ended_at IS NOT NULL
-        """).fetchone()
+            FROM sessions WHERE ended_at IS NOT NULL""" + u_sql + """
+        """, u_par).fetchone()
 
         pp_sids = [r[0] for r in s_rows[-50:]]
 
@@ -805,14 +819,15 @@ def db_trends() -> dict[str, Any]:
     }
 
 
-def db_stats(days: int = 0) -> dict[str, Any]:
+def db_stats(days: int = 0, user_id: str | None = None) -> dict[str, Any]:
     """Aggregates for the history dashboard:
        per-day activity, lifetime totals, personal bests.
-       days=0 means all time."""
+       days=0 means all time. user_id filtert auf einen Nutzer."""
     day_filter = (
         f"AND started_at >= current_date - INTERVAL {int(days)} DAY"
         if days > 0 else ""
     )
+    u_sql, u_par = _user_clause(user_id)
     with _db_lock:
         daily_rows = db().execute(f"""
             SELECT CAST(date_trunc('day', started_at) AS DATE) AS day,
@@ -822,11 +837,11 @@ def db_stats(days: int = 0) -> dict[str, Any]:
                    AVG(avg_power)                   AS avg_power
               FROM sessions
              WHERE ended_at IS NOT NULL
-               {day_filter}
+               {day_filter}{u_sql}
              GROUP BY 1 ORDER BY 1
-        """).fetchall()
+        """, u_par).fetchall()
 
-        totals_row = db().execute("""
+        totals_row = db().execute(f"""
             SELECT COUNT(*)                          AS sessions,
                    COALESCE(SUM(duration_s),     0) AS duration_s,
                    COALESCE(SUM(total_distance), 0) AS distance_m,
@@ -836,17 +851,17 @@ def db_stats(days: int = 0) -> dict[str, Any]:
                    AVG(avg_pace)                     AS avg_pace,
                    AVG(avg_hr)                       AS avg_hr
               FROM sessions
-             WHERE ended_at IS NOT NULL
-        """).fetchone()
+             WHERE ended_at IS NOT NULL{u_sql}
+        """, u_par).fetchone()
 
-        bests_row = db().execute("""
+        bests_row = db().execute(f"""
             SELECT MAX(max_power)      AS max_power,
                    MAX(total_distance) AS max_distance,
                    MAX(duration_s)     AS max_duration_s,
                    MIN(NULLIF(avg_pace, 0)) AS best_pace
               FROM sessions
-             WHERE ended_at IS NOT NULL
-        """).fetchone()
+             WHERE ended_at IS NOT NULL{u_sql}
+        """, u_par).fetchone()
 
     daily = [{
         "day": d.isoformat(),
@@ -1706,7 +1721,8 @@ async def api_session_stop(session_id: int, body: dict[str, Any] | None = None):
 
 
 @app.post("/api/sessions/import")
-async def api_session_import(file: UploadFile = File(...)):
+async def api_session_import(file: UploadFile = File(...),
+                             user_id: str | None = Form(None)):
     """
     Import a completed workout from a Kinomap export.
 
@@ -1749,6 +1765,13 @@ async def api_session_import(file: UploadFile = File(...)):
     except ValueError as e:
         raise HTTPException(409, str(e))
 
+    if user_id:
+        def _assign() -> None:
+            with _db_lock:
+                db().execute("UPDATE sessions SET user_id = ? WHERE id = ?",
+                             [user_id, sid])
+        await asyncio.to_thread(_assign)
+
     log.info(
         "imported session id=%s (%s, %.0fs, %sm) from %s",
         sid, result.workout_name, result.duration_s,
@@ -1768,8 +1791,8 @@ async def api_session_import(file: UploadFile = File(...)):
 
 
 @app.get("/api/sessions")
-async def api_list_sessions(limit: int = 100):
-    return db_list_sessions(limit)
+async def api_list_sessions(limit: int = 100, user_id: str | None = None):
+    return db_list_sessions(limit, user_id)
 
 
 @app.get("/api/sessions/{session_id}")
@@ -1825,16 +1848,16 @@ async def api_resistance_set(body: dict[str, Any]):
 
 
 @app.get("/api/stats")
-async def api_stats(days: int = 0):
-    return await asyncio.to_thread(db_stats, days)
+async def api_stats(days: int = 0, user_id: str | None = None):
+    return await asyncio.to_thread(db_stats, days, user_id)
 
 
 @app.get("/api/stats/trends")
-async def api_stats_trends():
+async def api_stats_trends(user_id: str | None = None):
     # Heaviest read in the app: per-session power-profile sliding-window
     # computation in pure Python over up to 50 sessions' worth of samples.
     # Definitely worth keeping off the event loop.
-    return await asyncio.to_thread(db_trends)
+    return await asyncio.to_thread(db_trends, user_id)
 
 
 @app.post("/api/shutdown")
